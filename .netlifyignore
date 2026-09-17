@@ -1,0 +1,4 @@
+# Production already has migrations 001–007 applied. The attached/local source
+# does not contain the byte-exact applied 006/007 history, so do not submit a
+# partial migration directory during application-only hardening deploys.
+netlify/database/**
