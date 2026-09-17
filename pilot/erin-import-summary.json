@@ -1,0 +1,103 @@
+{
+  "student": "Erin George",
+  "institution": "SACAP",
+  "source_file": "Practicum Log-Sheet & Hours Tracker 2026.xlsx",
+  "as_of": "2026-09-16",
+  "components": [
+    {
+      "code": "counselling",
+      "name": "Counselling of children, adolescents & adults",
+      "target": 202,
+      "sheet_displayed_hours": 99.0,
+      "evidence_backed_hours": 99.0,
+      "unconfirmed_prefilled_hours": 0.0,
+      "recent_28d_hours": 42.0,
+      "recent_weekly_pace": 10.5
+    },
+    {
+      "code": "preparation-documentation",
+      "name": "Preparation & documentation of client engagement",
+      "target": 86,
+      "sheet_displayed_hours": 91.0,
+      "evidence_backed_hours": 91.0,
+      "unconfirmed_prefilled_hours": 0.0,
+      "recent_28d_hours": 34.0,
+      "recent_weekly_pace": 8.5
+    },
+    {
+      "code": "psychoeducation-community",
+      "name": "Psycho-education / community / public health / advocacy",
+      "target": 180,
+      "sheet_displayed_hours": 77.0,
+      "evidence_backed_hours": 67.0,
+      "unconfirmed_prefilled_hours": 10.0,
+      "recent_28d_hours": 18.0,
+      "recent_weekly_pace": 4.5
+    },
+    {
+      "code": "training-supervision",
+      "name": "Training & supervision",
+      "target": 72,
+      "sheet_displayed_hours": 64.0,
+      "evidence_backed_hours": 50.0,
+      "unconfirmed_prefilled_hours": 14.0,
+      "recent_28d_hours": 9.5,
+      "recent_weekly_pace": 2.38
+    },
+    {
+      "code": "ethical-professional",
+      "name": "Ethical & professional conduct",
+      "target": 36,
+      "sheet_displayed_hours": 36.0,
+      "evidence_backed_hours": 34.0,
+      "unconfirmed_prefilled_hours": 2.0,
+      "recent_28d_hours": 2.0,
+      "recent_weekly_pace": 0.5
+    },
+    {
+      "code": "psychometric-assessment",
+      "name": "Basic psychological assessment",
+      "target": 72,
+      "sheet_displayed_hours": 70.0,
+      "evidence_backed_hours": 70.0,
+      "unconfirmed_prefilled_hours": 0.0,
+      "recent_28d_hours": 33.0,
+      "recent_weekly_pace": 8.25
+    },
+    {
+      "code": "other-professional",
+      "name": "Other professional activities",
+      "target": 72,
+      "sheet_displayed_hours": 65.5,
+      "evidence_backed_hours": 59.5,
+      "unconfirmed_prefilled_hours": 6.0,
+      "recent_28d_hours": 2.0,
+      "recent_weekly_pace": 0.5
+    }
+  ],
+  "anomalies": [
+    {
+      "sheet": "Other Professional Activities",
+      "value": "02 June 0206",
+      "activity": "Site assignment",
+      "type": "nonstandard_date"
+    },
+    {
+      "sheet": "Prep & Documentation",
+      "value": "2025-07-05",
+      "activity": "writing individual case note",
+      "type": "date_outside_2026"
+    }
+  ],
+  "totals": {
+    "sheet_displayed": 502.5,
+    "evidence_backed": 470.5,
+    "unconfirmed_prefilled": 32.0
+  },
+  "counselling_projection": {
+    "remaining_hours": 103.0,
+    "recent_weekly_pace": 10.5,
+    "weeks_to_target_at_recent_pace": 9.8,
+    "estimated_target_date_at_recent_pace": "2026-11-23"
+  }
+}

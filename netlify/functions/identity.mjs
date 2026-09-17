@@ -1,0 +1,3 @@
+import { getDatabase } from '@netlify/database';
+const clean=v=>String(v||'').trim().toLowerCase();
+export default{async userSignup(event){const e=clean(event.user.email),leads=new Set((process.env.PROGRAMME_LEAD_EMAILS||'').split(',').map(clean).filter(Boolean)),role=leads.has(e)?'programme_lead':'intern';try{const db=getDatabase();await db.pool.query(`INSERT INTO profiles(identity_user_id,email,display_name,role) VALUES($1,$2,$3,$4) ON CONFLICT(email) DO UPDATE SET identity_user_id=EXCLUDED.identity_user_id,role=EXCLUDED.role`,[event.user.id,e,event.user.name||e.split('@')[0],role])}catch(x){console.error(x)}return{user:{...event.user,appMetadata:{...event.user.appMetadata,roles:[role]}}}}};

@@ -1,0 +1,1 @@
+{"name":"stellenbosch-rc-practicum-hub","version":"4.3.0","private":true,"type":"module","dependencies":{"@netlify/database":"2.0.1","@netlify/functions":"6.0.0","@netlify/identity":"2.0.0"}}
