@@ -458,3 +458,4 @@ $('#modalClose').onclick=closeModal; $('#modal').onclick=e=>e.target.id==='modal
 $('#emergency').onclick=()=>$('#em').classList.add('open'); $('#emClose').onclick=()=>$('#em').classList.remove('open');
 $('#quickHelp').onclick=()=>{S.assistantSeed='';go('assistant');};
 init();
+
