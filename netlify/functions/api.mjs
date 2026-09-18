@@ -1,7 +1,23 @@
 import { getDatabase } from '@netlify/database';
 import { getUser } from '@netlify/identity';
 
-const db = getDatabase();
+const db = getDatabase();// One-time defensive schema patch: production was missing this column on a few
+// tables (deployed code expected it, but the applied migration history didn't
+// add it everywhere). Functions connect with full read/write access, unlike the
+// dashboard's SQL console, so this repairs it safely on cold start without
+// needing manual DDL. IF NOT EXISTS makes it a no-op once the column is present.
+let schemaEnsured = null;
+function ensureSchema() {
+  if (!schemaEnsured) {
+    schemaEnsured = Promise.all([
+      db.pool.query('ALTER TABLE referrals ADD COLUMN IF NOT EXISTS updated_by_identity_user_id text'),
+      db.pool.query('ALTER TABLE requirement_opening_balances ADD COLUMN IF NOT EXISTS updated_by_identity_user_id text'),
+      db.pool.query('ALTER TABLE competency_progress ADD COLUMN IF NOT EXISTS updated_by_identity_user_id text'),
+      db.pool.query('ALTER TABLE deliverable_progress ADD COLUMN IF NOT EXISTS updated_by_identity_user_id text')
+    ]).catch(error => { schemaEnsured = null; throw error; });
+  }
+  return schemaEnsured;
+}
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 const cleanEmail = v => String(v || '').trim().toLowerCase();
@@ -622,7 +638,7 @@ async function programme(ctx) {
 
 export default async request => {
   try {
-    requireSameOrigin(request);
+    requireSameOrigin(request);    await ensureSchema();
     const ctx = await context();
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/api\/?/, '').replace(/\/$/, '');
