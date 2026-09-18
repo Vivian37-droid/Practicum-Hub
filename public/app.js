@@ -454,7 +454,7 @@ $('#login').onsubmit=async e=>{e.preventDefault();try{await S.identity.login($('
 $('#setPassword').onsubmit=async e=>{e.preventDefault();const password=$('#newPassword').value;if(password!==$('#confirmPassword').value)return authError('The passwords do not match.');try{if(pendingAuthCallback?.type==='invite')await S.identity.acceptInvite(pendingAuthCallback.token,password);else if(pendingAuthCallback?.type==='recovery')await S.identity.updateUser({password});else throw Error('The invitation or recovery link is no longer active.');location.replace('/');}catch(x){authError(x.message);}};
 $('#logout').onclick=()=>S.preview?location.reload():(S.identity.logout().then(()=>location.reload()));
 $('#menu').onclick=()=>$('aside').classList.toggle('open');
-$('#modalClose').onclick=closeModal; $('#modal').onclick=e=>e.target.id==='modal'&&closeModal();
+$('#modalClose').onclick=closeModal; $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal();};
 $('#emergency').onclick=()=>$('#em').classList.add('open'); $('#emClose').onclick=()=>$('#em').classList.remove('open');
 $('#quickHelp').onclick=()=>{S.assistantSeed='';go('assistant');};
 init();
