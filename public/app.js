@@ -92,10 +92,29 @@ async function go(view) {
 }
 
 function activeId() { return S.session.role === 'intern' ? S.session.profile.id : S.intern?.id || 0; }
-function needIntern() {
+function needIntern(prefix = '') {
   if (activeId()) return true;
-  $('#content').innerHTML = '<div class="notice info">Select an intern first from the Interns screen.</div>';
+  $('#content').innerHTML = prefix + '<div class="notice info">Select an intern first from the Interns screen.</div>';
   return false;
+}
+// Persistent intern switcher: lets programme_lead/supervisor jump between
+// interns from any of the per-intern views, instead of only via a row click
+// on the Dashboard/Interns tables (which was the only way S.intern got set).
+async function internSwitcherHtml() {
+  if (!['programme_lead', 'supervisor'].includes(S.session.role)) return '';
+  const list = await api('interns');
+  S._internList = list;
+  const activeIdVal = activeId();
+  const opts = list.map(x => `<option value="${x.id}" ${x.id == activeIdVal ? 'selected' : ''}>${esc(x.display_name)}</option>`).join('');
+  return `<div class="card" style="margin-bottom:14px"><label style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><b>Viewing intern:</b><select id="internSwitch" style="flex:1;min-width:180px">${list.length ? opts : '<option value="">No interns yet</option>'}</select></label></div>`;
+}
+function bindInternSwitcher() {
+  const sel = $('#internSwitch');
+  if (!sel) return;
+  sel.onchange = () => {
+    const found = (S._internList || []).find(i => i.id == sel.value);
+    if (found) { S.intern = found; go(S.view); }
+  };
 }
 function bindGo() { $$('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go)); }
 
@@ -214,12 +233,13 @@ function referralModal(item, internsData) {
 async function saveReferral(e){if(e.target.id!=='fReferral')return;e.preventDefault();const item=resolveSite(Object.fromEntries(new FormData(e.target)));try{await api('referrals',{method:item.id?'PATCH':'POST',body:JSON.stringify(item)});closeModal();toast(item.id?'Referral updated':'Referral added');go('referrals');}catch(x){toast(x.message);}}
 
 async function requirementsView() {
-  if (!needIntern()) return;
+  const switcherHtml = await internSwitcherHtml();
+  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), req = await api(`requirements?intern_id=${id}`), s = req.summary;
   const canSetOpening = S.session.role !== 'intern' && S.session.role !== 'management';
   const rows = req.components.filter(x => x.calculation_mode !== 'deliverable').map(x => `<tr><td><b>${esc(x.name)}</b><br><span class="muted">${responsibilityLabel(x.responsibility)}</span></td><td>${fmt(x.completed)} / ${fmt(x.target_hours)}${x.opening_balance ? `<br><small class="muted">Opening balance: ${fmt(x.opening_balance)} h</small>` : ''}</td><td>${progressBar(x.completed, x.target_hours)}<small>${pc(x.completed, x.target_hours)}%</small></td><td>${fmt(x.remaining)}</td><td>${x.needed_per_week == null ? '—' : fmt(x.needed_per_week) + ' h/wk'}</td><td>${x.projected_completion == null ? '—' : fmt(x.projected_completion)}</td><td>${tag(x.status)}</td>${canSetOpening ? `<td><button class="btn small" data-opening="${x.id}">Opening balance</button></td>` : ''}</tr>`).join('');
   const deliverables = req.components.filter(x => x.calculation_mode === 'deliverable');
-  $('#content').innerHTML = `<div class="hero"><small>${esc(req.profile.requirement_profile_name || '')}</small><h1>${S.session.role === 'intern' ? 'Your requirement profile' : esc(req.profile.display_name) + ' · requirement profile'}</h1><p>The 720-hour programme is broken into the categories required by the intern’s institution. Campus/institution components remain visible without making the placement site responsible for producing them.</p><div class="actions"><button class="btn" data-go="hours">Log non-session activity</button><button class="btn" data-go="cases">Record counselling activity</button><button class="btn" data-go="assistant">Ask about my progress</button></div></div>
+  $('#content').innerHTML = switcherHtml + `<div class="hero"><small>${esc(req.profile.requirement_profile_name || '')}</small><h1>${S.session.role === 'intern' ? 'Your requirement profile' : esc(req.profile.display_name) + ' · requirement profile'}</h1><p>The 720-hour programme is broken into the categories required by the intern’s institution. Campus/institution components remain visible without making the placement site responsible for producing them.</p><div class="actions"><button class="btn" data-go="hours">Log non-session activity</button><button class="btn" data-go="cases">Record counselling activity</button><button class="btn" data-go="assistant">Ask about my progress</button></div></div>
     ${requirementSummaryCard(req)}
     ${s.source_audit ? `<div class="notice amber" style="margin-top:14px"><b>Imported logbook audit:</b> The institutional sheet displays <b>${fmt(s.source_audit.sheet_displayed_total)} h</b>, while <b>${fmt(s.source_audit.evidence_backed_total)} h</b> is currently supported by student-signed rows. <b>${fmt(s.source_audit.unconfirmed_prefilled_hours)} h</b> appears in pre-filled rows without the student signature and has not been counted as completed in this pilot. ${s.source_audit.data_quality_note ? esc(s.source_audit.data_quality_note) : ''}</div>` : ''}
     <div class="grid two" style="margin-top:14px">${clinicalPaceCard(req)}<div class="card"><h3>How the target works</h3><p>Remaining hours ÷ remaining placement weeks gives the weekly pace required. Counselling is translated into equivalent attended sessions and a booking target adjusted for the intern’s actual attendance rate.</p><p class="muted">Individual counselling activity is derived from attended case sessions and their duration. This avoids logging the same clinical time twice.</p>${canSetOpening ? '<p class="muted">For interns already mid-placement, use <b>Opening balance</b> once to carry across hours already completed in their institutional logbook. New Hub activity is then added from that point forward.</p>' : ''}</div></div>
@@ -227,6 +247,7 @@ async function requirementsView() {
     ${deliverables.length ? `<div class="section"><div><h3>Required deliverables</h3><p>Tracked as completion tasks rather than invented hour values.</p></div></div><div class="card list">${deliverables.map(d => `<div class="row"><div class="grow"><b>${esc(d.name)}</b><br><small class="muted">${responsibilityLabel(d.responsibility)}</small></div><select data-deliverable="${d.id}"><option ${d.deliverable_status === 'Not started' ? 'selected' : ''}>Not started</option><option ${d.deliverable_status === 'In progress' ? 'selected' : ''}>In progress</option><option ${d.deliverable_status === 'Complete' ? 'selected' : ''}>Complete</option></select></div>`).join('')}</div>` : ''}
     <div class="notice info" style="margin-top:14px"><b>Verified requirement profile:</b> ${esc(req.profile.requirement_profile_name || 'Generic')}. Hour targets are based on the supplied 2026 source material. Site/shared/campus responsibility labels are operational programme classifications and can be adjusted if the institutions specify a different split.</div>`;
   bindGo();
+  bindInternSwitcher();
   $$('[data-deliverable]').forEach(sel => sel.onchange = async () => { await api('requirements', { method: 'PATCH', body: JSON.stringify({ intern_profile_id: id, component_id: +sel.dataset.deliverable, status: sel.value }) }); toast('Deliverable updated'); });
   $$('[data-opening]').forEach(btn => btn.onclick = () => openingBalanceModal(req.components.find(x => x.id == btn.dataset.opening), id));
 }
@@ -243,12 +264,14 @@ async function saveOpeningBalance(e) {
 }
 
 async function cases() {
+  const switcherHtml = await internSwitcherHtml();
   const id = activeId(), query = id ? `cases?intern_id=${id}` : 'cases', data = await api(query);
   const canPlan = ['programme_lead', 'supervisor'].includes(S.session.role);
   const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${esc(x.site)}</td>${id ? '' : `<td>${esc(x.intern_name)}</td>`}<td>${esc(x.presenting_category || '—')}</td><td>${x.sessions}</td><td>${canPlan ? `<select data-frequency="${x.id}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td>${tag(x.supervision_status)}</td><td><select data-status="${x.id}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}">Record session</button></td></tr>`).join('');
-  $('#content').innerHTML = `<div class="section"><div><h3>${S.session.role === 'intern' ? 'My cases' : id ? esc(S.intern.display_name) + ' · cases' : 'All cases'}</h3><p>De-identified workflow. Frequency feeds the caseload adequacy calculation.</p></div>${['programme_lead', 'supervisor'].includes(S.session.role) && id ? '<button id="addCase" class="btn primary">Allocate case</button>' : ''}</div>
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${S.session.role === 'intern' ? 'My cases' : id ? esc(S.intern.display_name) + ' · cases' : 'All cases'}</h3><p>De-identified workflow. Frequency feeds the caseload adequacy calculation.</p></div>${['programme_lead', 'supervisor'].includes(S.session.role) && id ? '<button id="addCase" class="btn primary">Allocate case</button>' : ''}</div>
     ${table(['Case code', 'Site', ...(id ? [] : ['Intern']), 'Category', 'Sessions', 'Planned frequency', 'Supervision', 'Status', 'Activity'], rows)}
     <div class="notice info" style="margin-top:12px">Individual counselling hours are calculated from attended session duration. Do not enter patient names, ID numbers, phone numbers, addresses or narrative clinical notes.</div>`;
+  bindInternSwitcher();
   $$('[data-status]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.status, status: sel.value }) }); toast('Status updated'); });
   $$('[data-frequency]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.frequency, planned_frequency_weeks: +sel.value }) }); toast('Frequency updated'); });
   $$('[data-act]').forEach(b => b.onclick = () => activityModal(data.find(x => x.id == b.dataset.act)));
@@ -259,9 +282,11 @@ function activityModal(c) { modal('Record counselling activity · ' + c.case_cod
 async function saveActivity(e) { if (e.target.id !== 'fActivity') return; e.preventDefault(); try { await api('encounters', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Session recorded'); go('cases'); } catch (x) { toast(x.message); } }
 
 async function supervision() {
-  if (!needIntern()) return;
+  const switcherHtml = await internSwitcherHtml();
+  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), data = await api(`supervision?intern_id=${id}`), isIntern = S.session.role === 'intern';
-  $('#content').innerHTML = `<div class="section"><div><h3>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h3><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}">Review</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h3><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}">Review</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
+  bindInternSwitcher();
   $('#addSup').onclick = () => supervisionModal(id);
   $$('[data-review]').forEach(b => b.onclick = () => { const x = data.find(i => i.id == b.dataset.review); modal('Review supervision item', `<form id="fSupReview"><input type="hidden" name="id" value="${x.id}"><div class="field"><label>Supervisor response<textarea name="supervisor_note">${esc(x.supervisor_note || '')}</textarea></label></div><div class="field"><label>Status<select name="status"><option>Open</option><option selected>Reviewed</option><option>Closed</option></select></label></div><button class="btn primary">Save</button></form>`); });
 }
@@ -270,22 +295,26 @@ async function saveSup(e) { if (e.target.id !== 'fSup') return; e.preventDefault
 async function saveSupReview(e) { if (e.target.id !== 'fSupReview') return; e.preventDefault(); try { await api('supervision', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Supervision updated'); go('supervision'); } catch (x) { toast(x.message); } }
 
 async function competencies() {
-  if (!needIntern()) return;
+  const switcherHtml = await internSwitcherHtml();
+  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), data = await api(`competencies?intern_id=${id}`), isIntern = S.session.role === 'intern';
-  $('#content').innerHTML = `<div class="section"><div><h3>${isIntern ? 'My competency development' : 'Competency development'}</h3><p>Ratings are supported by evidence and supervisor feedback.</p></div></div><div class="grid three">${data.map(x => `<div class="card competency"><b>${esc(x.name)}</b><p class="muted">${esc(x.description)}</p><div class="rating"><span>Intern</span><b>${x.intern_rating || '—'} / 5</b><span>Supervisor</span><b>${x.supervisor_rating || '—'} / 5</b></div>${x.evidence ? `<p><small><b>Evidence:</b> ${esc(x.evidence)}</small></p>` : ''}${x.supervisor_comment ? `<p><small><b>Feedback:</b> ${esc(x.supervisor_comment)}</small></p>` : ''}<button class="btn" data-comp="${x.id}">${isIntern ? 'Update reflection' : 'Assess / feedback'}</button></div>`).join('')}</div>`;
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'My competency development' : 'Competency development'}</h3><p>Ratings are supported by evidence and supervisor feedback.</p></div></div><div class="grid three">${data.map(x => `<div class="card competency"><b>${esc(x.name)}</b><p class="muted">${esc(x.description)}</p><div class="rating"><span>Intern</span><b>${x.intern_rating || '—'} / 5</b><span>Supervisor</span><b>${x.supervisor_rating || '—'} / 5</b></div>${x.evidence ? `<p><small><b>Evidence:</b> ${esc(x.evidence)}</small></p>` : ''}${x.supervisor_comment ? `<p><small><b>Feedback:</b> ${esc(x.supervisor_comment)}</small></p>` : ''}<button class="btn" data-comp="${x.id}">${isIntern ? 'Update reflection' : 'Assess / feedback'}</button></div>`).join('')}</div>`;
+  bindInternSwitcher();
   $$('[data-comp]').forEach(b => b.onclick = () => competencyModal(data.find(x => x.id == b.dataset.comp), id, isIntern));
 }
 function competencyModal(x, id, isIntern) { modal(x.name, `<form id="fComp"><input type="hidden" name="intern_profile_id" value="${id}"><input type="hidden" name="competency_id" value="${x.id}">${isIntern ? `<div class="field"><label>Self-rating (1–5)<input name="intern_rating" type="number" min="1" max="5" value="${x.intern_rating || ''}"></label></div><div class="field"><label>Evidence / example<textarea name="evidence">${esc(x.evidence || '')}</textarea></label></div>` : `<div class="field"><label>Supervisor rating (1–5)<input name="supervisor_rating" type="number" min="1" max="5" value="${x.supervisor_rating || ''}"></label></div><div class="field"><label>Feedback / development focus<textarea name="supervisor_comment">${esc(x.supervisor_comment || '')}</textarea></label></div>`}<button class="btn primary">Save</button></form>`); }
 async function saveComp(e) { if (e.target.id !== 'fComp') return; e.preventDefault(); try { await api('competencies', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Competency updated'); go('competencies'); } catch (x) { toast(x.message); } }
 
 async function hours() {
-  if (!needIntern()) return;
+  const switcherHtml = await internSwitcherHtml();
+  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), [data, req] = await Promise.all([api(`hours?intern_id=${id}`), api(`requirements?intern_id=${id}`)]);
   const opts = data.components.map(c => `<option value="${esc(c.code)}">${esc(c.manual_label || c.name)}</option>`).join('');
-  $('#content').innerHTML = `<div class="section"><div><h3>Activity log</h3><p>Log non-individual counselling activities directly against the institution’s formal categories.</p></div><button id="logHours" class="btn primary">Log activity hours</button></div>
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>Activity log</h3><p>Log non-individual counselling activities directly against the institution’s formal categories.</p></div><button id="logHours" class="btn primary">Log activity hours</button></div>
     <div class="grid two"><div class="notice info"><b>Individual counselling is automatic.</b><br>Attended case sessions and their duration feed the counselling requirement. Do not log those hours again here.</div><div class="card"><b>${esc(req.profile.requirement_profile_name || '')}</b><p class="muted">${fmt(req.summary.total_completed)} of ${fmt(req.summary.total_target)} formal hours currently recorded.</p>${progressBar(req.summary.total_completed, req.summary.total_target)}</div></div>
     <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b><br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b></div>`).join('') || 'No manually logged activity yet.'}</div>`;
-  $('#logHours').onclick = () => modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`); 
+  bindInternSwitcher();
+  $('#logHours').onclick = () => modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`);
 }
 async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
 
@@ -458,4 +487,3 @@ $('#modalClose').onclick=closeModal; $('#modal').onclick=e=>{if(e.target.id==='m
 $('#emergency').onclick=()=>$('#em').classList.add('open'); $('#emClose').onclick=()=>$('#em').classList.remove('open');
 $('#quickHelp').onclick=()=>{S.assistantSeed='';go('assistant');};
 init();
-
