@@ -1,12 +1,12 @@
-// Auth/role/authorization logic. This is a direct port of context(),
-// requireRole(), canAccessIntern(), assertInternAccess(), audit(),
-// ensureRequirementProfile() and loadProfile() from the old
-// netlify/functions/api.mjs, with @netlify/identity's getUser() replaced by
-// verifying the Supabase Auth access token the frontend sends in the
-// Authorization header.
+// Auth/role/authorization logic. Ported from the old netlify/functions/api.mjs,
+// with @netlify/identity's getUser() replaced by verifying the Supabase Auth
+// access token the frontend sends in the Authorization header, and — as of
+// the PostgREST migration — all database access going through supabase-js's
+// .from()/.rpc() builders (HTTP) instead of raw `sql` tagged-template queries
+// (TCP), which were unreliable from this Cloudflare Pages Functions runtime.
 
-import { HttpError, cleanEmail, leadEmails, num } from './util.js';
-import { getSql, getAdmin } from './clients.js';
+import { HttpError, cleanEmail, leadEmails, num, unwrap } from './util.js';
+import { getAdmin } from './clients.js';
 
 async function getAuthUser(request, env) {
   const authHeader = request.headers.get('authorization') || '';
@@ -21,28 +21,21 @@ async function getAuthUser(request, env) {
 export async function context(request, env) {
   const user = await getAuthUser(request, env);
   if (!user) throw new HttpError(401, 'Please sign in');
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const email = cleanEmail(user.email);
-
-  let [profile] = await sql`
-    SELECT * FROM profiles WHERE identity_user_id = ${user.id} OR lower(email) = ${email}
-    ORDER BY identity_user_id IS NOT NULL DESC LIMIT 1`;
 
   const metadataRoles = user.app_metadata?.roles || user.user_metadata?.roles || [];
   const role = leadEmails(env).has(email)
     ? 'programme_lead'
     : (['programme_lead', 'supervisor', 'management', 'intern'].find(r => metadataRoles.includes(r)) || 'intern');
 
-  if (!profile) {
-    [profile] = await sql`
-      INSERT INTO profiles(identity_user_id, email, display_name, role)
-      VALUES (${user.id}, ${email}, ${user.user_metadata?.display_name || email.split('@')[0]}, ${role})
-      RETURNING *`;
-  } else if (profile.identity_user_id !== user.id || profile.role !== role) {
-    [profile] = await sql`
-      UPDATE profiles SET identity_user_id = ${user.id}, role = ${role}, updated_at = NOW()
-      WHERE id = ${profile.id} RETURNING *`;
-  }
+  const profile = unwrap(await admin.rpc('app_context_upsert', {
+    p_identity_user_id: user.id,
+    p_email: email,
+    p_default_display_name: user.user_metadata?.display_name || email.split('@')[0],
+    p_role: role
+  }));
+
   return { user, profile, role };
 }
 
@@ -56,9 +49,15 @@ export async function canAccessIntern(ctx, id, env) {
   if (ctx.role === 'programme_lead') return true;
   if (ctx.role === 'intern') return ctx.profile.id === id;
   if (ctx.role === 'supervisor') {
-    const sql = getSql(env);
-    const [row] = await sql`SELECT 1 FROM profiles WHERE id = ${id} AND supervisor_identity_user_id = ${ctx.user.id}`;
-    return !!row;
+    const admin = getAdmin(env);
+    const { data, error } = await admin
+      .from('profiles')
+      .select('id')
+      .eq('id', id)
+      .eq('supervisor_identity_user_id', ctx.user.id)
+      .maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    return !!data;
   }
   return false;
 }
@@ -68,33 +67,61 @@ export async function assertInternAccess(ctx, id, env) {
 }
 
 export async function audit(ctx, env, action, entityType, entityId, detail, profileId) {
-  const sql = getSql(env);
-  await sql`
-    INSERT INTO audit_log(identity_user_id, profile_id, action, entity_type, entity_id, detail)
-    VALUES (${ctx.user.id}, ${profileId || ctx.profile.id}, ${action}, ${entityType}, ${entityId ? String(entityId) : null}, ${detail ? JSON.stringify(detail) : null})`;
+  const admin = getAdmin(env);
+  const { error } = await admin.from('audit_log').insert({
+    identity_user_id: ctx.user.id,
+    profile_id: profileId || ctx.profile.id,
+    action,
+    entity_type: entityType,
+    entity_id: entityId ? String(entityId) : null,
+    detail: detail ? JSON.stringify(detail) : null
+  });
+  if (error) throw new HttpError(500, error.message);
 }
 
 export async function ensureRequirementProfile(env, profile) {
   if (profile.requirement_profile_id) return profile.requirement_profile_id;
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const code = profile.institution === 'SACAP' ? 'sacap-bpsych' : profile.institution === 'Cornerstone Institute' ? 'cornerstone-bpsych' : 'generic-720';
-  const [row] = await sql`SELECT id FROM requirement_profiles WHERE code = ${code}`;
+  const { data: row, error } = await admin.from('requirement_profiles').select('id').eq('code', code).maybeSingle();
+  if (error) throw new HttpError(500, error.message);
   if (!row) return null;
-  await sql`UPDATE profiles SET requirement_profile_id = ${row.id} WHERE id = ${profile.id}`;
+  const { error: updateError } = await admin.from('profiles').update({ requirement_profile_id: row.id }).eq('id', profile.id);
+  if (updateError) throw new HttpError(500, updateError.message);
   return row.id;
 }
 
+function flattenProfile(row) {
+  if (!row) return row;
+  const rp = row.requirement_profiles;
+  const { requirement_profiles, ...rest } = row;
+  return {
+    ...rest,
+    requirement_profile_code: rp?.code ?? null,
+    requirement_profile_name: rp?.name ?? null,
+    overall_programme_hours: rp?.overall_programme_hours ?? null
+  };
+}
+
 export async function loadProfile(env, id) {
-  const sql = getSql(env);
-  let [profile] = await sql`
-    SELECT p.*, rp.code requirement_profile_code, rp.name requirement_profile_name, rp.overall_programme_hours
-    FROM profiles p LEFT JOIN requirement_profiles rp ON rp.id = p.requirement_profile_id WHERE p.id = ${id}`;
-  if (!profile) throw new HttpError(404, 'Intern not found');
+  const admin = getAdmin(env);
+  const { data, error } = await admin
+    .from('profiles')
+    .select('*, requirement_profiles(code, name, overall_programme_hours)')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  if (!data) throw new HttpError(404, 'Intern not found');
+  let profile = flattenProfile(data);
   const rpId = await ensureRequirementProfile(env, profile);
   if (rpId && !profile.requirement_profile_id) {
-    [profile] = await sql`
-      SELECT p.*, rp.code requirement_profile_code, rp.name requirement_profile_name, rp.overall_programme_hours
-      FROM profiles p LEFT JOIN requirement_profiles rp ON rp.id = p.requirement_profile_id WHERE p.id = ${id}`;
+    const { data: refetched, error: refetchError } = await admin
+      .from('profiles')
+      .select('*, requirement_profiles(code, name, overall_programme_hours)')
+      .eq('id', id)
+      .maybeSingle();
+    if (refetchError) throw new HttpError(500, refetchError.message);
+    profile = flattenProfile(refetched);
   }
   return profile;
 }
