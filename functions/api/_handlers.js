@@ -592,7 +592,7 @@ export async function supervisionFeed(ctx, env) {
 export async function competencies(ctx, env, url, body, method) {
   const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
-  await assertInternAccess(cpx, id, env);
+  await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
     const rows = unwrap(await admin.from('competency_definitions')
       .select('*, competency_progress(intern_rating, supervisor_rating, evidence, supervisor_comment, intern_profile_id)')
@@ -749,10 +749,42 @@ export async function referrals(ctx, env, url, body, method) {
   return row;
 }
 
-export async function pilotContext(ctx, env, url) {
+export async function pilotContext(ctx, env, url, body, method) {
   const admin = getAdmin(env);
-  const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : 0));
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const itemId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!itemId) throw new HttpError(400, 'Schedule item id is required');
+    const { data: row, error } = await admin.from('weekly_schedule_items').select('*').eq('id', itemId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Schedule item not found');
+    const { error: delErr } = await admin.from('weekly_schedule_items').update({ active: false }).eq('id', itemId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    await audit(ctx, env, 'delete', 'weekly_schedule_items', itemId, { title: row.title }, row.intern_profile_id);
+    return { ok: true, deleted_id: itemId };
+  }
+  const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
+  if (method === 'POST') {
+    requireRole(ctx, ['programme_lead']);
+    const weekday = Number(body.weekday);
+    if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) throw new HttpError(400, 'Weekday is required');
+    const title = String(body.title || '').trim();
+    if (!title) throw new HttpError(400, 'Title is required');
+    const row = unwrap(await admin.from('weekly_schedule_items').insert({
+      intern_profile_id: id,
+      weekday,
+      title,
+      start_time: body.start_time || null,
+      end_time: body.end_time || null,
+      site: body.site || null,
+      recurrence_note: body.recurrence_note || null,
+      activity_type: body.activity_type || null,
+      active: true
+    }).select().single());
+    await audit(ctx, env, 'create', 'weekly_schedule_items', row.id, { title, site: row.site }, id);
+    return row;
+  }
   const [scheduleRes, plannedRes] = await Promise.all([
     admin.from('weekly_schedule_items').select('*').eq('intern_profile_id', id).eq('active', true)
       .order('weekday', { ascending: true }).order('start_time', { ascending: true, nullsFirst: false }),
