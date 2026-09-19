@@ -19,7 +19,7 @@ export async function onRequest({ request, env }) {
 
     if (path === 'bootstrap') return json({ profile: ctx.profile, role: ctx.role, dashboard: await h.dashboard(ctx, env) });
     if (path === 'dashboard') return json(await h.dashboard(ctx, env));
-    if (path === 'interns') return json(await h.interns(ctx, env, body, method), method === 'POST' ? 201 : 200);
+    if (path === 'interns') return json(await h.interns(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'requirements') return json(await h.requirements(ctx, env, url, body, method));
     if (path === 'cases') return json(await h.cases(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'encounters') return json(await h.encounters(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
