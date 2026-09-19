@@ -45,6 +45,22 @@ const titles = { dashboard: 'Dashboard', interns: 'Interns', referrals: 'Referra
 function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 2200); }
 function modal(title, html) { $('#modalTitle').textContent = title; $('#modalBody').innerHTML = html; $('#modal').classList.add('open'); }
 function closeModal() { $('#modal').classList.remove('open'); }
+// Programme-lead-only admin delete. The server independently enforces
+// programme_lead on every DELETE endpoint (role is derived from
+// PROGRAMME_LEAD_EMAILS, not anything the client sends), so this confirm
+// step is purely UX — interns/supervisors never even see these buttons,
+// and could not use them if they did.
+function confirmModal(title, message, onConfirm) {
+  modal(title, `<p>${message}</p><div class="full" style="display:flex;gap:10px;margin-top:14px"><button id="confirmYes" class="btn danger-btn">Delete</button><button id="confirmNo" class="btn">Cancel</button></div>`);
+  $('#confirmYes').onclick = async () => { $('#confirmYes').disabled = true; await onConfirm(); };
+  $('#confirmNo').onclick = closeModal;
+}
+function adminDelete(path, id, label, after) {
+  confirmModal(`Delete this ${label}?`, `This permanently deletes this ${esc(label)} and cannot be undone.`, async () => {
+    try { await api(`${path}?id=${id}`, { method: 'DELETE' }); closeModal(); toast(label.charAt(0).toUpperCase() + label.slice(1) + ' deleted'); after(); }
+    catch (x) { closeModal(); toast(x.message); }
+  });
+}
 const roleName = r => ({ programme_lead: 'Programme Lead', supervisor: 'Supervisor', intern: 'Intern', management: 'Management' }[r] || r);
 const metric = (label, value, note = '') => `<div class="card metric"><label>${label}</label><strong>${value}</strong><div class="muted">${note}</div></div>`;
 const table = (headers, rows, empty = 'No records yet.') => `<div class="tablewrap"><table><thead><tr>${headers.map(x => `<th>${x}</th>`).join('')}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}">${empty}</td></tr>`}</tbody></table></div>`;
@@ -190,16 +206,21 @@ async function dashboard() {
 
 async function interns() {
   const data = await api('interns');
+  const isAdmin = S.session.role === 'programme_lead';
   const rows = data.map(x => {
     const s = x.requirement_summary || {};
     const attention = s.at_risk_components ? 'Target at risk' : s.watch_components ? 'Watch' : 'On track';
-    return `<tr class="click" data-id="${x.id}"><td><b>${esc(x.display_name)}</b><br>${esc(x.email)}</td><td>${esc(x.institution || '—')}</td><td>${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td>${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td>${tag(attention)}</td><td>${x.active_cases}</td><td><span class="tag ${x.identity_user_id ? 'green' : 'amber'}">${x.identity_user_id ? 'Login linked' : 'No login linked'}</span></td></tr>`;
+    return `<tr class="click" data-id="${x.id}"><td><b>${esc(x.display_name)}</b><br>${esc(x.email)}</td><td>${esc(x.institution || '—')}</td><td>${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td>${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td>${tag(attention)}</td><td>${x.active_cases}</td><td><span class="tag ${x.identity_user_id ? 'green' : 'amber'}">${x.identity_user_id ? 'Login linked' : 'No login linked'}</span></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}">Delete</button></td>` : ''}</tr>`;
   }).join('');
   $('#content').innerHTML = `<div class="section"><div><h3>Intern placements</h3><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
-    ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account'], rows)}
+    ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account', ...(isAdmin ? ['Admin'] : [])], rows)}
     <div class="notice info" style="margin-top:12px"><b>Account setup:</b> Adding a new intern automatically sends them a Supabase sign-in invitation by email. SACAP and Cornerstone use different formal hour categories, and the Hub loads the selected profile automatically.</div>`;
   $$('[data-id]').forEach(x => x.onclick = () => { S.intern = data.find(i => i.id == x.dataset.id); go('progress'); });
   $('#addIntern')?.addEventListener('click', () => { modal('Add intern', `<form id="fIntern" class="formgrid"><div class="field"><label>Name<input name="display_name" required></label></div><div class="field"><label>Email<input name="email" type="email" required></label></div><div class="field"><label>Institution<select name="institution"><option>SACAP</option><option>Cornerstone Institute</option><option>Other</option></select></label></div><div class="field"><label>Default counselling session length (min)<input name="default_session_minutes" type="number" min="15" max="240" value="60"></label></div><div class="field"><label>Placement start<input name="placement_start" type="date"></label></div><div class="field"><label>Placement end<input name="placement_end" type="date"></label></div><div class="full"><button class="btn primary">Create placement</button></div></form>`); });
+  $$('[data-del-intern]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    adminDelete('interns', b.dataset.delIntern, `intern placement for ${b.dataset.delName} (and all of their cases, hours, supervision and history)`, () => go('interns'));
+  }));
 }
 async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { S.intern = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast(S.intern.invite?.sent ? 'Placement created · invite email sent' : S.intern.invite && !S.intern.invite.sent ? `Placement created, but the invite email failed: ${S.intern.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
 
@@ -214,7 +235,8 @@ async function referrals() {
   const [data, internsData] = await Promise.all([api(query), own ? Promise.resolve([]) : api('interns')]);
   const open = data.filter(x => !String(x.status).startsWith('Closed')).length;
   const overdue = data.filter(x => x.next_action_date && x.next_action_date < today() && !String(x.status).startsWith('Closed')).length;
-  const rows = data.map(x => `<tr><td><b>${esc(x.referral_code)}</b></td>${own?'':`<td>${esc(x.intern_name)}</td>`}<td>${esc(x.referral_date)}</td><td>${esc(x.referral_source||'—')}</td><td>${esc(x.site||'—')}</td><td>${tag(x.priority)}</td><td>${tag(x.status)}</td><td>${x.contact_attempts}</td><td>${x.next_action_date?esc(x.next_action_date):'—'}</td><td>${esc(x.last_update||'—')}</td><td><button class="btn small" data-referral-update="${x.id}">Update</button></td></tr>`).join('');
+  const isAdmin = S.session.role === 'programme_lead';
+  const rows = data.map(x => `<tr><td><b>${esc(x.referral_code)}</b></td>${own?'':`<td>${esc(x.intern_name)}</td>`}<td>${esc(x.referral_date)}</td><td>${esc(x.referral_source||'—')}</td><td>${esc(x.site||'—')}</td><td>${tag(x.priority)}</td><td>${tag(x.status)}</td><td>${x.contact_attempts}</td><td>${x.next_action_date?esc(x.next_action_date):'—'}</td><td>${esc(x.last_update||'—')}</td><td><button class="btn small" data-referral-update="${x.id}">Update</button>${isAdmin?` <button class="btn small danger-btn" data-del-referral="${x.id}">Delete</button>`:''}</td></tr>`).join('');
   $('#content').innerHTML = `<div class="hero"><small>De-identified workflow</small><h1>${own?'Track the referrals allocated to you.':'See what happened after each referral was allocated.'}</h1><p>Record contact progress, booking, intake and closure so referrals do not disappear from view.</p><div class="actions"><button id="addReferral" class="btn">Add referral</button></div></div>
     <div class="grid metrics">${metric('Open referrals',open)}${metric('Overdue next actions',overdue)}${metric('Total tracked',data.length)}${metric('Awaiting feedback',data.filter(x=>x.status==='Awaiting feedback').length)}</div>
     <div class="section"><div><h3>${own?'My referral list':S.intern?esc(S.intern.display_name)+' · referrals':'All intern referrals'}</h3><p>Status and a short operational update are visible to the intern and supervisor.</p></div></div>
@@ -222,6 +244,7 @@ async function referrals() {
     <div class="notice info" style="margin-top:12px">Do not enter patient names, ID numbers, phone numbers, addresses or clinical narrative. Keep clinical documentation in the approved patient record.</div>`;
   $('#addReferral').onclick=()=>referralModal(null,internsData);
   $$('[data-referral-update]').forEach(b=>b.onclick=()=>referralModal(data.find(x=>x.id==b.dataset.referralUpdate),internsData));
+  $$('[data-del-referral]').forEach(b=>b.onclick=()=>adminDelete('referrals', b.dataset.delReferral, 'referral', () => go('referrals')));
 }
 function referralModal(item, internsData) {
   const isEdit=!!item, own=S.session.role==='intern';
@@ -272,14 +295,16 @@ async function cases() {
   const switcherHtml = await internSwitcherHtml();
   const id = activeId(), query = id ? `cases?intern_id=${id}` : 'cases', data = await api(query);
   const canPlan = ['programme_lead', 'supervisor'].includes(S.session.role);
-  const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${esc(x.site)}</td>${id ? '' : `<td>${esc(x.intern_name)}</td>`}<td>${esc(x.presenting_category || '—')}</td><td>${x.sessions}</td><td>${canPlan ? `<select data-frequency="${x.id}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td>${tag(x.supervision_status)}</td><td><select data-status="${x.id}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}">Record session</button></td></tr>`).join('');
+  const isAdmin = S.session.role === 'programme_lead';
+  const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${esc(x.site)}</td>${id ? '' : `<td>${esc(x.intern_name)}</td>`}<td>${esc(x.presenting_category || '—')}</td><td>${x.sessions}</td><td>${canPlan ? `<select data-frequency="${x.id}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td>${tag(x.supervision_status)}</td><td><select data-status="${x.id}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}">Record session</button></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-case="${x.id}">Delete</button></td>` : ''}</tr>`).join('');
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${S.session.role === 'intern' ? 'My cases' : id ? esc(S.intern.display_name) + ' · cases' : 'All cases'}</h3><p>De-identified workflow. Frequency feeds the caseload adequacy calculation.</p></div>${['programme_lead', 'supervisor'].includes(S.session.role) && id ? '<button id="addCase" class="btn primary">Allocate case</button>' : ''}</div>
-    ${table(['Case code', 'Site', ...(id ? [] : ['Intern']), 'Category', 'Sessions', 'Planned frequency', 'Supervision', 'Status', 'Activity'], rows)}
+    ${table(['Case code', 'Site', ...(id ? [] : ['Intern']), 'Category', 'Sessions', 'Planned frequency', 'Supervision', 'Status', 'Activity', ...(isAdmin ? ['Admin'] : [])], rows)}
     <div class="notice info" style="margin-top:12px">Individual counselling hours are calculated from attended session duration. Do not enter patient names, ID numbers, phone numbers, addresses or narrative clinical notes.</div>`;
   bindInternSwitcher();
   $$('[data-status]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.status, status: sel.value }) }); toast('Status updated'); });
   $$('[data-frequency]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.frequency, planned_frequency_weeks: +sel.value }) }); toast('Frequency updated'); });
   $$('[data-act]').forEach(b => b.onclick = () => activityModal(data.find(x => x.id == b.dataset.act)));
+  $$('[data-del-case]').forEach(b => b.onclick = () => adminDelete('cases', b.dataset.delCase, 'case (and its recorded sessions)', () => go('cases')));
   $('#addCase')?.addEventListener('click', () => { modal('Allocate de-identified case', `<form id="fCase" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Case code<input name="case_code" placeholder="KHC-026" required></label></div><div class="field"><label>Site<select name="site" required>${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Presenting category<input name="presenting_category"></label></div><div class="field"><label>Planned frequency<select name="planned_frequency_weeks"><option value="1">Weekly</option><option value="2">Fortnightly</option><option value="4">Monthly</option></select></label></div><div class="full"><button class="btn primary">Allocate</button></div></form>`); bindSiteToggle($('#fCase')); });
 }
 async function saveCase(e) { if (e.target.id !== 'fCase') return; e.preventDefault(); try { await api('cases', { method: 'POST', body: JSON.stringify(resolveSite(Object.fromEntries(new FormData(e.target)))) }); closeModal(); toast('Case allocated'); go('cases'); } catch (x) { toast(x.message); } }
@@ -301,11 +326,12 @@ async function supervision() {
     if (['programme_lead', 'supervisor'].includes(S.session.role)) return supervisionAllView(switcherHtml);
     if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   }
-  const id = activeId(), data = await api(`supervision?intern_id=${id}`), isIntern = S.session.role === 'intern';
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h3><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}">Review</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
+  const id = activeId(), data = await api(`supervision?intern_id=${id}`), isIntern = S.session.role === 'intern', isAdmin = S.session.role === 'programme_lead';
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h3><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}">Delete</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
   bindInternSwitcher();
   $('#addSup').onclick = () => supervisionModal(id);
   $$('[data-review]').forEach(b => b.onclick = () => { const x = data.find(i => i.id == b.dataset.review); modal('Review supervision item', `<form id="fSupReview"><input type="hidden" name="id" value="${x.id}"><div class="field"><label>Supervisor response<textarea name="supervisor_note">${esc(x.supervisor_note || '')}</textarea></label></div><div class="field"><label>Status<select name="status"><option>Open</option><option selected>Reviewed</option><option>Closed</option></select></label></div><button class="btn primary">Save</button></form>`); });
+  $$('[data-del-sup]').forEach(b => b.onclick = () => adminDelete('supervision', b.dataset.delSup, 'supervision item', () => go('supervision')));
 }
 function supervisionModal(id, preset = {}) { modal('Add to supervision', `<form id="fSup" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Topic<input name="topic" value="${esc(preset.topic || '')}" required></label></div><div class="field"><label>Priority<select name="priority"><option>Routine</option><option>Important</option><option>Risk / urgent</option></select></label></div><div class="full field"><label>What exactly are you unsure about?<textarea name="question" required>${esc(preset.question || '')}</textarea></label></div><div class="full field"><label>What have you already considered / tried?<textarea name="action_taken">${esc(preset.action_taken || '')}</textarea></label></div><div class="full"><button class="btn primary">Add to supervision</button></div></form>`); }
 async function saveSup(e) { if (e.target.id !== 'fSup') return; e.preventDefault(); try { await api('supervision', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Added to supervision'); if (S.view === 'supervision') go('supervision'); } catch (x) { toast(x.message); } }
@@ -335,11 +361,13 @@ async function hours() {
   if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), [data, req] = await Promise.all([api(`hours?intern_id=${id}`), api(`requirements?intern_id=${id}`)]);
   const opts = data.components.map(c => `<option value="${esc(c.code)}">${esc(c.manual_label || c.name)}</option>`).join('');
+  const isAdmin = S.session.role === 'programme_lead';
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>Activity log</h3><p>Log non-individual counselling activities directly against the institution’s formal categories.</p></div><button id="logHours" class="btn primary">Log activity hours</button></div>
     <div class="grid two"><div class="notice info"><b>Individual counselling is automatic.</b><br>Attended case sessions and their duration feed the counselling requirement. Do not log those hours again here.</div><div class="card"><b>${esc(req.profile.requirement_profile_name || '')}</b><p class="muted">${fmt(req.summary.total_completed)} of ${fmt(req.summary.total_target)} formal hours currently recorded.</p>${progressBar(req.summary.total_completed, req.summary.total_target)}</div></div>
-    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b><br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b></div>`).join('') || 'No manually logged activity yet.'}</div>`;
+    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b><br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small danger-btn" data-del-hours="${x.id}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
   bindInternSwitcher();
   $('#logHours').onclick = () => modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`);
+  $$('[data-del-hours]').forEach(b => b.onclick = () => adminDelete('hours', b.dataset.delHours, 'activity entry', () => go('hours')));
 }
 async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
 
@@ -359,10 +387,11 @@ async function feedbackView(){
   if(!needIntern()) return;
   const id=activeId();
   const data=await api(`feedback?intern_id=${id}`);
-  const isIntern=S.session.role==='intern';
+  const isIntern=S.session.role==='intern', isAdmin=S.session.role==='programme_lead';
   $('#content').innerHTML=`<div class="hero"><small>Live pilot</small><h1>${isIntern?'Help shape the Practicum Hub.':'Pilot feedback'}</h1><p>${isIntern?'Tell us what is useful, what gets in your way, and what you expected to find but could not.':'Review what the intern is experiencing so the system improves during the pilot.'}</p></div>
     ${isIntern?`<div class="card" style="margin-top:14px"><form id="fFeedback" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Type<select name="feedback_type"><option>What worked</option><option>What was frustrating</option><option>I could not find something</option><option>Suggestion</option><option>General</option></select></label></div><div class="field"><label>How useful was the Hub today? (1–5)<input name="rating" type="number" min="1" max="5"></label></div><div class="full field"><label>Feedback<textarea name="message" required placeholder="Be specific — what were you trying to do?"></textarea></label></div><div class="full"><button class="btn primary">Send feedback</button></div></form></div>`:''}
-    <div class="section"><div><h3>Feedback history</h3><p>Used during the Erin pilot to drive weekly iteration.</p></div></div><div class="card list">${data.map(x=>`<div class="row"><div class="grow"><b>${esc(x.feedback_type)}</b> ${x.rating?`<span class="tag">${x.rating}/5</span>`:''}<br><span>${esc(x.message)}</span><br><small class="muted">${esc(String(x.created_at||'').slice(0,10))}${x.context_view?' · '+esc(x.context_view):''}</small></div>${tag(x.status||'New')}</div>`).join('')||'No feedback yet.'}</div>`;
+    <div class="section"><div><h3>Feedback history</h3><p>Used during the Erin pilot to drive weekly iteration.</p></div></div><div class="card list">${data.map(x=>`<div class="row"><div class="grow"><b>${esc(x.feedback_type)}</b> ${x.rating?`<span class="tag">${x.rating}/5</span>`:''}<br><span>${esc(x.message)}</span><br><small class="muted">${esc(String(x.created_at||'').slice(0,10))}${x.context_view?' · '+esc(x.context_view):''}</small></div>${tag(x.status||'New')}${isAdmin?`<button class="btn small danger-btn" data-del-feedback="${x.id}">Delete</button>`:''}</div>`).join('')||'No feedback yet.'}</div>`;
+  $$('[data-del-feedback]').forEach(b=>b.onclick=()=>adminDelete('feedback', b.dataset.delFeedback, 'feedback entry', () => go('feedback')));
 }
 
 const GUIDES = [
