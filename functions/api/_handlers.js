@@ -218,9 +218,35 @@ export async function dashboard(ctx, env) {
   return { profile: ctx.profile, interns, metrics };
 }
 
-export async function interns(ctx, env, body, method) {
+export async function interns(ctx, env, url, body, method) {
   requireRole(ctx, ['programme_lead', 'supervisor']);
   const admin = getAdmin(env);
+  // Admin-only hard delete (Vivian's explicit request). Restricted to
+  // programme_lead — supervisors and interns never get this, since role is
+  // derived server-side from PROGRAMME_LEAD_EMAILS and can't be spoofed by
+  // the client. Cascades (profiles.id ON DELETE CASCADE) remove all of the
+  // intern's cases, encounters, hours, supervision items, opening balances,
+  // competency progress, reports, referrals and schedule/planned items;
+  // audit_log rows are preserved (ON DELETE SET NULL). If the intern had
+  // accepted their invite, their Supabase Auth account is removed too so a
+  // deleted test intern can't still sign in.
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const internId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!internId) throw new HttpError(400, 'Intern id is required');
+    const { data: row, error } = await admin.from('profiles').select('id, display_name, email, identity_user_id').eq('id', internId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Intern not found');
+    await audit(ctx, env, 'delete', 'intern', internId, { display_name: row.display_name, email: row.email }, internId);
+    const { error: delErr } = await admin.from('profiles').delete().eq('id', internId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    let authDeleted = false;
+    if (row.identity_user_id) {
+      try { await admin.auth.admin.deleteUser(row.identity_user_id); authDeleted = true; }
+      catch (e) { console.error('Failed to delete linked auth account', e); }
+    }
+    return { ok: true, deleted_id: internId, auth_deleted: authDeleted };
+  }
   if (method === 'GET') {
     const supervisorId = ctx.role === 'supervisor' ? ctx.user.id : null;
     const listRows = unwrap(await admin.rpc('list_interns_with_counts', { p_supervisor_id: supervisorId, p_only_active: false }));
@@ -312,6 +338,18 @@ export async function requirements(ctx, env, url, body, method) {
 
 export async function cases(ctx, env, url, body, method) {
   const admin = getAdmin(env);
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const caseId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!caseId) throw new HttpError(400, 'Case id is required');
+    const { data: row, error } = await admin.from('cases').select('*').eq('id', caseId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Case not found');
+    await audit(ctx, env, 'delete', 'case', caseId, { case_code: row.case_code }, row.intern_profile_id);
+    const { error: delErr } = await admin.from('cases').delete().eq('id', caseId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    return { ok: true, deleted_id: caseId };
+  }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   if (method === 'GET') {
     if (id) {
@@ -373,6 +411,18 @@ export async function cases(ctx, env, url, body, method) {
 
 export async function encounters(ctx, env, url, body, method) {
   const admin = getAdmin(env);
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const encId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!encId) throw new HttpError(400, 'Encounter id is required');
+    const { data: row, error } = await admin.from('encounters').select('*').eq('id', encId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Encounter not found');
+    await audit(ctx, env, 'delete', 'encounter', encId, null, row.intern_profile_id);
+    const { error: delErr } = await admin.from('encounters').delete().eq('id', encId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    return { ok: true, deleted_id: encId };
+  }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
@@ -410,6 +460,18 @@ export async function encounters(ctx, env, url, body, method) {
 
 export async function hoursView(ctx, env, url, body, method) {
   const admin = getAdmin(env);
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const hoursId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!hoursId) throw new HttpError(400, 'Hours entry id is required');
+    const { data: row, error } = await admin.from('hours').select('*').eq('id', hoursId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Hours entry not found');
+    await audit(ctx, env, 'delete', 'hours', hoursId, { component_code: row.component_code, hours: row.hours }, row.intern_profile_id);
+    const { error: delErr } = await admin.from('hours').delete().eq('id', hoursId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    return { ok: true, deleted_id: hoursId };
+  }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
@@ -459,6 +521,18 @@ export async function hoursFeed(ctx, env) {
 
 export async function supervision(ctx, env, url, body, method) {
   const admin = getAdmin(env);
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const supId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!supId) throw new HttpError(400, 'Supervision item id is required');
+    const { data: row, error } = await admin.from('supervision_items').select('*').eq('id', supId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Supervision item not found');
+    await audit(ctx, env, 'delete', 'supervision', supId, { topic: row.topic }, row.intern_profile_id);
+    const { error: delErr } = await admin.from('supervision_items').delete().eq('id', supId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    return { ok: true, deleted_id: supId };
+  }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   if (method === 'PATCH') {
     requireRole(ctx, ['programme_lead', 'supervisor']);
@@ -518,7 +592,7 @@ export async function supervisionFeed(ctx, env) {
 export async function competencies(ctx, env, url, body, method) {
   const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
-  await assertInternAccess(ctx, id, env);
+  await assertInternAccess(cpx, id, env);
   if (method === 'GET') {
     const rows = unwrap(await admin.from('competency_definitions')
       .select('*, competency_progress(intern_rating, supervisor_rating, evidence, supervisor_comment, intern_profile_id)')
@@ -598,6 +672,18 @@ export async function reports(ctx, env, url, body, method) {
 
 export async function referrals(ctx, env, url, body, method) {
   const admin = getAdmin(env);
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const refId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!refId) throw new HttpError(400, 'Referral id is required');
+    const { data: row, error } = await admin.from('referrals').select('*').eq('id', refId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Referral not found');
+    await audit(ctx, env, 'delete', 'referral', refId, { referral_code: row.referral_code }, row.intern_profile_id);
+    const { error: delErr } = await admin.from('referrals').delete().eq('id', refId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    return { ok: true, deleted_id: refId };
+  }
   const requestedId = Number(url.searchParams.get('intern_id') || body.intern_profile_id || 0);
   const id = ctx.role === 'intern' ? ctx.profile.id : requestedId;
   if (method === 'GET') {
@@ -680,6 +766,18 @@ export async function pilotContext(ctx, env, url) {
 
 export async function feedback(ctx, env, url, body, method) {
   const admin = getAdmin(env);
+  if (method === 'DELETE') {
+    requireRole(ctx, ['programme_lead']);
+    const fbId = Number(url.searchParams.get('id') || body.id || 0);
+    if (!fbId) throw new HttpError(400, 'Feedback id is required');
+    const { data: row, error } = await admin.from('pilot_feedback').select('*').eq('id', fbId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Feedback not found');
+    await audit(ctx, env, 'delete', 'pilot_feedback', fbId, { type: row.feedback_type }, row.intern_profile_id);
+    const { error: delErr } = await admin.from('pilot_feedback').delete().eq('id', fbId);
+    if (delErr) throw new HttpError(500, delErr.message);
+    return { ok: true, deleted_id: fbId };
+  }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') return unwrap(await admin.from('pilot_feedback').select('*').eq('intern_profile_id', id).order('created_at', { ascending: false }).limit(200));
