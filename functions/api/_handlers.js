@@ -660,13 +660,18 @@ export async function reports(ctx, env, url, body, method) {
   const status = ctx.role === 'intern' ? 'Submitted' : 'Reviewed';
   const internComment = limited(body.intern_comment, 5000, 'Intern comment');
   const supervisorComment = limited(body.supervisor_comment, 5000, 'Supervisor comment');
+  // Reviewer identity is taken from the authenticated session, never from
+  // client-supplied input, so "reviewed by" on a report can't be spoofed.
+  const reviewedByName = status === 'Reviewed' ? (ctx.profile.display_name || ctx.profile.email || null) : null;
   const row = unwrap(await admin.rpc('upsert_monthly_report', {
     p_intern_id: id,
     p_month: month,
     p_status: status,
     p_intern_comment: internComment,
-    p_supervisor_comment: supervisorComment
+    p_supervisor_comment: supervisorComment,
+    p_reviewed_by_name: reviewedByName
   }));
+  await audit(ctx, env, status === 'Reviewed' ? 'review' : 'submit', 'monthly_report', row.id, { month, status }, id);
   return row;
 }
 
