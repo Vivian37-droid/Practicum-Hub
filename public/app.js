@@ -53,7 +53,12 @@ const progressBar = (done, target) => `<div class="progress"><span style="width:
 
 async function api(path, options = {}) {
   if (S.preview) return demoApi(path, options);
-  const response = await fetch('/api/' + path, { credentials: 'include', headers: { 'content-type': 'application/json' }, ...options });
+  const { data: { session } } = await S.supabase.auth.getSession();
+  if (!session) { location.reload(); throw Error('Your session has expired. Please sign in again.'); }
+  const response = await fetch('/api/' + path, {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.access_token}` },
+    ...options
+  });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw Error(body.error || 'Request failed');
   return body;
@@ -192,11 +197,11 @@ async function interns() {
   }).join('');
   $('#content').innerHTML = `<div class="section"><div><h3>Intern placements</h3><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
     ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account'], rows)}
-    <div class="notice info" style="margin-top:12px"><b>Account setup:</b> Adding an intern creates their placement profile only; it does not send an invitation. Invite the person separately from Netlify Identity after the controlled intern-access test has passed. SACAP and Cornerstone use different formal hour categories, and the Hub loads the selected profile automatically.</div>`;
+    <div class="notice info" style="margin-top:12px"><b>Account setup:</b> Adding a new intern automatically sends them a Supabase sign-in invitation by email. SACAP and Cornerstone use different formal hour categories, and the Hub loads the selected profile automatically.</div>`;
   $$('[data-id]').forEach(x => x.onclick = () => { S.intern = data.find(i => i.id == x.dataset.id); go('progress'); });
   $('#addIntern')?.addEventListener('click', () => { modal('Add intern', `<form id="fIntern" class="formgrid"><div class="field"><label>Name<input name="display_name" required></label></div><div class="field"><label>Email<input name="email" type="email" required></label></div><div class="field"><label>Institution<select name="institution"><option>SACAP</option><option>Cornerstone Institute</option><option>Other</option></select></label></div><div class="field"><label>Default counselling session length (min)<input name="default_session_minutes" type="number" min="15" max="240" value="60"></label></div><div class="field"><label>Placement start<input name="placement_start" type="date"></label></div><div class="field"><label>Placement end<input name="placement_end" type="date"></label></div><div class="full"><button class="btn primary">Create placement</button></div></form>`); });
 }
-async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { S.intern = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Placement created'); go('interns'); } catch (x) { toast(x.message); } }
+async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { S.intern = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast(S.intern.invite?.sent ? 'Placement created · invite email sent' : S.intern.invite && !S.intern.invite.sent ? `Placement created, but the invite email failed: ${S.intern.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
 
 const REFERRAL_STATUSES = ['Allocated','Contact attempted','Contact made','Booked','Intake completed','Active','Awaiting feedback','Closed – completed','Closed – no contact','Reallocated'];
 const SITES = ['Stellenbosch Hospital','Stellenbosch Hospital OPD','Cloetesville CDC','Groendal Clinic','Khayamandi Clinic','Klapmuts Clinic','Idas Valley Clinic','Don & Pat Clinic','Jamestown Clinic','Night Shelter','SACAP campus','Cornerstone campus'];
@@ -281,9 +286,21 @@ async function saveCase(e) { if (e.target.id !== 'fCase') return; e.preventDefau
 function activityModal(c) { modal('Record counselling activity · ' + c.case_code, `<form id="fActivity" class="formgrid"><input type="hidden" name="intern_profile_id" value="${c.intern_profile_id}"><input type="hidden" name="case_id" value="${c.id}"><div class="field"><label>Date<input name="encounter_date" type="date" value="${today()}" required></label></div><div class="field"><label>Session<select name="session_type"><option>First</option><option>Follow-up</option></select></label></div><div class="field"><label>Booked<select name="booked"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Attended<select name="attended"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Duration if attended (minutes)<input name="duration_minutes" type="number" min="1" max="480" value="60"></label></div><div class="field"><label>Gender for monthly statistics<select name="patient_gender"><option>Female</option><option>Male</option><option>Other</option><option>Unknown</option></select></label></div><div class="full"><button class="btn primary">Save activity</button></div></form>`); }
 async function saveActivity(e) { if (e.target.id !== 'fActivity') return; e.preventDefault(); try { await api('encounters', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Session recorded'); go('cases'); } catch (x) { toast(x.message); } }
 
+// §4 gap fix: when a programme_lead/supervisor hasn't picked an intern from
+// the switcher, show the cross-intern feed instead of just "select an
+// intern first" — there was previously no bird's-eye view of open
+// supervision items across the whole programme at all.
+async function supervisionAllView(switcherHtml) {
+  const data = await api('supervision-feed');
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>All interns · supervision</h3><p>Open and recently reviewed supervision items across every intern you can see.</p></div></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.intern_name)}</b> · <b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}</div>`).join('') || 'No supervision items yet.'}</div>`;
+  bindInternSwitcher();
+}
 async function supervision() {
   const switcherHtml = await internSwitcherHtml();
-  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
+  if (!activeId()) {
+    if (['programme_lead', 'supervisor'].includes(S.session.role)) return supervisionAllView(switcherHtml);
+    if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
+  }
   const id = activeId(), data = await api(`supervision?intern_id=${id}`), isIntern = S.session.role === 'intern';
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h3><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}">Review</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
   bindInternSwitcher();
@@ -305,8 +322,16 @@ async function competencies() {
 function competencyModal(x, id, isIntern) { modal(x.name, `<form id="fComp"><input type="hidden" name="intern_profile_id" value="${id}"><input type="hidden" name="competency_id" value="${x.id}">${isIntern ? `<div class="field"><label>Self-rating (1–5)<input name="intern_rating" type="number" min="1" max="5" value="${x.intern_rating || ''}"></label></div><div class="field"><label>Evidence / example<textarea name="evidence">${esc(x.evidence || '')}</textarea></label></div>` : `<div class="field"><label>Supervisor rating (1–5)<input name="supervisor_rating" type="number" min="1" max="5" value="${x.supervisor_rating || ''}"></label></div><div class="field"><label>Feedback / development focus<textarea name="supervisor_comment">${esc(x.supervisor_comment || '')}</textarea></label></div>`}<button class="btn primary">Save</button></form>`); }
 async function saveComp(e) { if (e.target.id !== 'fComp') return; e.preventDefault(); try { await api('competencies', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Competency updated'); go('competencies'); } catch (x) { toast(x.message); } }
 
+// §4 gap fix: combined activity feed across all interns, same rationale as
+// supervisionAllView above.
+async function hoursAllView(switcherHtml) {
+  const data = await api('hours-feed');
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>All interns · activity log</h3><p>Recently logged non-counselling activity across every intern you can see.</p></div></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.intern_name)}</b> · ${esc(x.component_name || x.category)}<br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b></div>`).join('') || 'No activity logged yet.'}</div>`;
+  bindInternSwitcher();
+}
 async function hours() {
   const switcherHtml = await internSwitcherHtml();
+  if (!activeId() && ['programme_lead', 'supervisor'].includes(S.session.role)) return hoursAllView(switcherHtml);
   if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), [data, req] = await Promise.all([api(`hours?intern_id=${id}`), api(`requirements?intern_id=${id}`)]);
   const opts = data.components.map(c => `<option value="${esc(c.code)}">${esc(c.manual_label || c.name)}</option>`).join('');
@@ -465,6 +490,8 @@ async function demoApi(path, options = {}) {
   if(route==='referrals'){if(method==='GET')return d.referrals;let x=d.referrals.find(x=>x.id===+body.id);if(method==='PATCH'){Object.assign(x,body);return x}const n={...body,id:Date.now(),intern_profile_id:id||+body.intern_profile_id||11,intern_name:'Erin George',contact_attempts:+body.contact_attempts||0};d.referrals.push(n);return n;}
   if(route==='encounters'){d.enc.push({...body,booked:String(body.booked)!=='false',attended:String(body.attended)!=='false'});return body;}
   if(route==='supervision'){if(method==='GET')return d.sup[id]||[];if(method==='POST'){(d.sup[id]||=[]).push({...body,id:Date.now(),status:'Open'});return body}return body;}
+  if(route==='supervision-feed')return Object.entries(d.sup).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
+  if(route==='hours-feed')return Object.entries(d.hours).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
   if(route==='competencies'){const defs=['Intake interviewing','Mental State Examination','Risk assessment','Case formulation','Short-term counselling','Documentation','Referral & MDT work','Professional conduct','Group / community work'];if(method==='GET')return defs.map((name,i)=>({id:i+1,name,description:'Developmental competency',...(d.comp[id]?.[i+1]||{})}));d.comp[id]||={};d.comp[id][body.competency_id]={...(d.comp[id][body.competency_id]||{}),...body};return body;}
   if(route==='hours'){if(method==='GET'){const req=demoRequirement(id);return{entries:d.hours[id]||[],components:req.components.filter(x=>['manual','manual_plus_individual_encounters'].includes(x.calculation_mode))};}(d.hours[id]||=[]).unshift({...body,hours:+body.hours,component_name:demoRequirement(id).components.find(x=>x.code===body.component_code)?.name||body.component_code});return body;}
   if(route==='reports'){if(method==='GET')return{report:d.report[id]||{status:'Draft'},hours:[],stats:{booked:0,attended:0,female:0,male:0,first_sessions:0,follow_up_sessions:0,counselling_minutes:0}};d.report[id]={...body,status:S.session.role==='intern'?'Submitted':'Reviewed'};return d.report[id];}
@@ -473,15 +500,38 @@ async function demoApi(path, options = {}) {
 }
 function demoProgramme(d){const atRiskInterns=demoRequirement(11).summary.at_risk_components>0?1:0;return{metrics:{interns:1,cases:0,active_cases:0,hours:470.5,at_risk_interns:atRiskInterns,open_supervision:0,reviewed_reports:0,booked:0,attended:0,attendance_rate:null,median_days_to_intake:null},sites:[],institutions:[{institution:'SACAP',count:1}]};}
 async function preview(role){S.preview=true;S.data=demo();const profile=role==='intern'?{id:11,display_name:'Erin George'}:{id:1,display_name:role==='management'?'Programme Viewer':'Vivian Leibrandt'};S.session={profile,role};shell();const requested=new URLSearchParams(location.search).get('view');if(requested&&titles[requested])setTimeout(()=>go(requested),0);}
-let pendingAuthCallback=null;
+let pendingAuthType=null;
 function authError(message){$('#authErr').classList.remove('hidden');$('#authErr').textContent=message;}
-function showPasswordSetup(result){pendingAuthCallback=result;$('#login').classList.add('hidden');$('#setPassword').classList.remove('hidden');$('#setPasswordMessage').innerHTML=result.type==='recovery'?'<b>Choose a new password</b><br>Enter and confirm your new password.':'<b>Finish setting up your account</b><br>Create a password to accept your invitation.';}
+function showPasswordSetup(type){pendingAuthType=type;$('#login').classList.add('hidden');$('#setPassword').classList.remove('hidden');$('#setPasswordMessage').innerHTML=type==='recovery'?'<b>Choose a new password</b><br>Enter and confirm your new password.':'<b>Finish setting up your account</b><br>Create a password to accept your invitation.';}
 async function finishLogin(){const b=await api('bootstrap');S.session={profile:b.profile,role:b.role};shell();}
-async function init(){const qp=new URLSearchParams(location.search),pr=window.__AUTO_PREVIEW__||qp.get('preview'),allowed=location.hostname==='localhost'||location.hostname==='127.0.0.1'||pr!==null;if(allowed){$('#preview').classList.remove('hidden');$$('[data-preview]').forEach(b=>b.onclick=()=>preview(b.dataset.preview));}if(['programme_lead','intern','management'].includes(pr))return preview(pr);try{S.identity=await import('https://cdn.jsdelivr.net/npm/@netlify/identity@2.0.0/+esm');const result=await S.identity.handleAuthCallback();if(result&&['invite','recovery'].includes(result.type))return showPasswordSetup(result);if(await S.identity.getUser())return finishLogin();}catch(e){if(!allowed)authError(e.message||'Netlify Identity could not complete authentication.');}}
 
-$('#login').onsubmit=async e=>{e.preventDefault();try{await S.identity.login($('#email').value,$('#password').value);await finishLogin();}catch(x){authError(x.message);}};
-$('#setPassword').onsubmit=async e=>{e.preventDefault();const password=$('#newPassword').value;if(password!==$('#confirmPassword').value)return authError('The passwords do not match.');try{if(pendingAuthCallback?.type==='invite')await S.identity.acceptInvite(pendingAuthCallback.token,password);else if(pendingAuthCallback?.type==='recovery')await S.identity.updateUser({password});else throw Error('The invitation or recovery link is no longer active.');location.replace('/');}catch(x){authError(x.message);}};
-$('#logout').onclick=()=>S.preview?location.reload():(S.identity.logout().then(()=>location.reload()));
+// Auth: Supabase Auth (supabase-js) replaces @netlify/identity. Invite and
+// password-recovery links both land back on this page with tokens in the
+// URL hash; supabase-js's detectSessionInUrl consumes that hash on client
+// creation and establishes a (temporary, for invite/recovery) session
+// automatically, then fires onAuthStateChange with the matching event.
+async function init(){
+  const qp=new URLSearchParams(location.search),pr=window.__AUTO_PREVIEW__||qp.get('preview'),allowed=location.hostname==='localhost'||location.hostname==='127.0.0.1'||pr!==null;
+  if(allowed){$('#preview').classList.remove('hidden');$$('[data-preview]').forEach(b=>b.onclick=()=>preview(b.dataset.preview));}
+  if(['programme_lead','intern','management'].includes(pr))return preview(pr);
+  try{
+    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+    if(!window.__SUPABASE_URL__ || window.__SUPABASE_URL__.includes('YOUR-PROJECT-REF')) throw Error('Supabase is not configured yet (see public/config.js).');
+    S.supabase=createClient(window.__SUPABASE_URL__, window.__SUPABASE_ANON_KEY__);
+    const hashType=new URLSearchParams(location.hash.replace(/^#/,'')).get('type');
+    S.supabase.auth.onAuthStateChange((event, session)=>{
+      if(event==='PASSWORD_RECOVERY') return showPasswordSetup('recovery');
+      if(event==='SIGNED_IN' && hashType==='invite' && pendingAuthType!==null) return; // already showing set-password form
+      if(event==='SIGNED_IN' && hashType==='invite') return showPasswordSetup('invite');
+    });
+    const { data: { session } } = await S.supabase.auth.getSession();
+    if(session && !hashType) return finishLogin();
+  }catch(e){ if(!allowed) authError(e.message||'Sign-in could not be completed.'); }
+}
+
+$('#login').onsubmit=async e=>{e.preventDefault();try{const {error}=await S.supabase.auth.signInWithPassword({email:$('#email').value,password:$('#password').value});if(error)throw error;await finishLogin();}catch(x){authError(x.message);}};
+$('#setPassword').onsubmit=async e=>{e.preventDefault();const password=$('#newPassword').value;if(password!==$('#confirmPassword').value)return authError('The passwords do not match.');try{const {error}=await S.supabase.auth.updateUser({password});if(error)throw error;history.replaceState(null,'',location.pathname);location.replace('/');}catch(x){authError(x.message);}};
+$('#logout').onclick=()=>S.preview?location.reload():(S.supabase.auth.signOut().then(()=>location.reload()));
 $('#menu').onclick=()=>$('aside').classList.toggle('open');
 $('#modalClose').onclick=closeModal; $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal();};
 $('#emergency').onclick=()=>$('#em').classList.add('open'); $('#emClose').onclick=()=>$('#em').classList.remove('open');
