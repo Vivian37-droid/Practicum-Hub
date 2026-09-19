@@ -1,1 +1,18 @@
-{"name":"stellenbosch-rc-practicum-hub","version":"4.3.0","private":true,"type":"module","dependencies":{"@netlify/database":"2.0.1","@netlify/functions":"6.0.0","@netlify/identity":"2.0.0"}}
+{
+  "name": "stellenbosch-rc-practicum-hub",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Registered Counsellor practicum management hub — Cloudflare Pages + Supabase rebuild.",
+  "scripts": {
+    "dev": "wrangler pages dev public --compatibility-date=2026-09-01 --compatibility-flags=nodejs_compat",
+    "deploy": "wrangler pages deploy public --compatibility-date=2026-09-01 --compatibility-flags=nodejs_compat"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.116.0",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}

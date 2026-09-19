@@ -1,0 +1,18 @@
+name = "practicum-hub"
+pages_build_output_dir = "public"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Secrets (set with `wrangler pages secret put <NAME>`, or in the Cloudflare
+# Pages dashboard under Settings → Environment variables — mark them
+# "Encrypted"/secret, never plain-text, since they grant full DB/auth-admin
+# access):
+#   SUPABASE_DB_URL            postgres connection string (use the Supabase
+#                               "Connection pooling" URL, transaction mode,
+#                               port 6543 — not the direct :5432 URL, which
+#                               Workers' TCP limits don't suit well)
+#   SUPABASE_URL                https://<project-ref>.supabase.co
+#   SUPABASE_SERVICE_ROLE_KEY   service_role key (Project Settings → API)
+#   PROGRAMME_LEAD_EMAILS       comma-separated emails treated as programme_lead
+#   PUBLIC_SITE_URL             e.g. https://practicum-hub.pages.dev (used as
+#                               the invite email's redirect target)

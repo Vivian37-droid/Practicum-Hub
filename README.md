@@ -1,97 +1,160 @@
-# Stellenbosch RC Practicum Hub v4.2 — Erin live-pilot integration
+# Stellenbosch RC Practicum Hub — Cloudflare Pages + Supabase
 
-A multi-user practicum-management and learning application for the Stellenbosch Subdistrict Registered Counsellor placement programme.
+This is the rebuild described in `REBUILD_SPEC.md` from the old
+Netlify-hosted app (`Vivian37-droid/Practicum-Hub`). Same features, same
+data model, new stack — see that spec for the full history and reasoning.
+Frontend logic (`public/app.js`, `public/index.html`) is carried over almost
+unchanged; what changed is what it talks to:
 
-## What changed in v4 / v4.1
+| | Old (Netlify) | New (this repo) |
+|---|---|---|
+| Hosting | Netlify static + Functions | Cloudflare Pages + Pages Functions |
+| Database | Netlify DB (Neon Postgres) | Supabase Postgres |
+| Auth | Netlify Identity | Supabase Auth |
+| Schema | none checked in (ad hoc) | `supabase/migrations/0001_init.sql` |
 
-### Verified institution-specific requirement profiles
-The old single `720 hours` progress bar has been replaced with formal requirement profiles.
+## One-time setup
 
-**SACAP 2026:** 202 counselling; 86 preparation/documentation; 180 psycho-education/community/public-health/advocacy; 72 training/supervision; 36 ethical/professional conduct; 72 psychological assessment; 72 other professional activities = 720.
+### 1. Create the Supabase project
 
-**Cornerstone 2026:** 120 individual counselling; 100 group counselling; 100 professional skills development; 140 administration; 24 supervision; 20 presentations; 60 psychometrics; 130 community; 26 other professional activities = 720. Professional and personal journals are tracked as deliverables because the supplied logbook shows no hour target for them.
+1. Create a project at supabase.com, **on the work account**, not personal
+   (per REBUILD_SPEC.md §8.1 — keeps billing/usage attributable to work).
+2. In the SQL editor, run `supabase/migrations/0001_init.sql` once. This is
+   the entire schema plus the reference data (requirement profiles/
+   components, the 9 fixed competencies) from REBUILD_SPEC.md §6–§7. If you
+   use the Supabase CLI instead: `supabase link` then `supabase db push`.
+3. Under **Authentication → Providers**, keep only Email enabled.
+4. Under **Authentication → URL Configuration**, set the Site URL to your
+   Cloudflare Pages URL (or custom domain) once you have it — this is where
+   invite/recovery links redirect back to.
+5. Under **Project Settings → API**, note down:
+   - Project URL
+   - `anon` `public` key
+   - `service_role` key (**secret** — server-side only, never in the browser)
+6. Under **Project Settings → Database → Connection pooling**, copy the
+   **Transaction mode** connection string (port 6543) — this is what the
+   backend uses (Cloudflare Workers' TCP support suits pooled, short-lived
+   connections; the direct :5432 URL is for long-lived server processes).
 
-See `docs/requirement-sources.md` for source and interpretation notes.
+### 2. Create your own programme_lead account
 
-### Pace-to-target engine
-For each hour-bearing requirement the Hub now calculates:
-- completed and remaining hours;
-- percentage complete;
-- remaining placement weeks;
-- weekly hours needed to finish;
-- recent/lifetime pace and projected completion;
-- On track / Watch / Target at risk status.
+Rather than a hardcoded seed row, sign yourself up as the first user via
+Supabase's dashboard (**Authentication → Users → Invite user**) with your
+own email, then add that email to the `PROGRAMME_LEAD_EMAILS` secret below —
+`context()` (`functions/_shared/context.js`) promotes anyone in that list to
+`programme_lead` on their first authenticated request, same as the old
+`leadEmails()` check in `netlify/functions/api.mjs`.
 
-For the relevant clinical counselling requirement it also calculates:
-- equivalent attended counselling sessions required per week;
-- booking target adjusted for the intern's actual attendance rate;
-- expected weekly sessions from the active caseload and planned case frequency;
-- whether additional clinical allocation / throughput may be needed.
+### 3. Configure Cloudflare Pages
 
-### No double-counting of individual counselling
-Attended individual case sessions record their duration. That duration automatically contributes to the institution's individual/combined counselling requirement. Interns do not manually log those same hours again.
+1. Create a Pages project in the **work** Cloudflare account, connected to
+   this repo, build output directory `public`.
+2. Under **Settings → Environment variables**, add these as **secrets** for
+   both Production and Preview:
+   - `SUPABASE_DB_URL` — the pooler connection string from step 1.6
+   - `SUPABASE_URL` — the project URL from step 1.5
+   - `SUPABASE_SERVICE_ROLE_KEY` — from step 1.5
+   - `PROGRAMME_LEAD_EMAILS` — comma-separated, e.g. `vivian.leibrandt@westerncape.gov.za`
+   - `PUBLIC_SITE_URL` — your Pages URL, e.g. `https://practicum-hub.pages.dev`
+3. Set compatibility flags: `nodejs_compat` (needed by `postgres` and
+   `@supabase/supabase-js`), compatibility date `2026-09-01` or later — both
+   are already in `wrangler.toml` for local `wrangler pages dev`/`deploy`,
+   but the dashboard's own Pages project settings need it set too for git-
+   push deploys.
+4. Fill in `public/config.js` with the real Project URL and `anon` key (this
+   file is intentionally plain and public — the anon key alone cannot read
+   or write any table, because RLS is enabled with no policies; see the
+   comment at the top of the migration file). Commit it once filled in.
 
-SACAP's combined counselling category can additionally receive manually logged group/family counselling hours. Cornerstone group counselling is logged against its separate 100-hour requirement.
+### 4. Local development
 
-### Practicum Assistant
-A contextual `Help / I'm stuck` layer is now built into the Hub. It provides:
-- risk/escalation routing;
-- RC scope prompts;
-- session-planning / clinical-thinking prompts;
-- documentation coaching;
-- live placement-hour guidance;
-- handbook retrieval;
-- one-click conversion of uncertainty into a supervision item.
+```
+npm install
+npm run dev     # wrangler pages dev, serves public/ + functions/ locally
+```
 
-This version is deliberately **grounded assistance**, not an unrestricted generative clinical chatbot. It does not diagnose and does not replace supervision. A generative AI model can be added later if governance, privacy and cost are agreed.
+You'll still need the Supabase project reachable (it's a hosted service, so
+local dev talks to your real dev/staging Supabase project — consider a
+separate Supabase project for this if you don't want local testing touching
+production data).
 
-## Existing core features
-- One site with Programme Lead, Supervisor, Intern and Management roles.
-- Server-side permission checks.
-- Netlify Identity authentication model.
-- Netlify Database (Postgres) with migrations.
-- De-identified case workflow.
-- Supervision queue and supervisor feedback.
-- Competency evidence, self-rating and supervisor rating.
-- Monthly booked/attended, male/female, first/follow-up statistics.
-- Programme evidence dashboard.
-- Original searchable 27-section handbook.
-- Emergency quick reference from every role.
-- Mobile-responsive UI.
+## Migrating real data from the old Netlify DB
 
-## Data-governance boundary
-The Hub is designed for de-identified programme-management data. Do not enter patient names, ID numbers, telephone numbers, addresses or narrative clinical records unless WCDHW separately approves an architecture for identifiable clinical information.
+Per REBUILD_SPEC.md §8.3 — do this via a real export, not by re-typing:
 
-## Deploying to the existing Netlify project
-Project: `bpsychpracticumhandbook`
+```
+# From the OLD Netlify DB connection string:
+pg_dump --data-only --column-inserts \
+  -t profiles -t cases -t referrals -t encounters -t hours \
+  -t supervision_items -t competency_progress -t requirement_opening_balances \
+  -t deliverable_progress -t monthly_reports -t weekly_schedule_items \
+  -t planned_activities -t pilot_feedback \
+  "$OLD_NETLIFY_DB_URL" > pilot-data.sql
 
-1. Deploy this repository/folder to the existing project.
-2. Enable Netlify Identity and set registration to invite-only.
-3. `PROGRAMME_LEAD_EMAILS` is used to recognise programme-lead accounts.
-4. Netlify Database provisions automatically through `@netlify/database` and applies the migrations.
-5. Create each intern profile in the Hub, then invite the same email via Netlify Identity.
+# Then apply to the NEW Supabase DB (after 0001_init.sql has already run,
+# so requirement_profiles/requirement_components/competency_definitions IDs
+# already exist and match what profiles/competency_progress reference):
+psql "$SUPABASE_DB_URL" -f pilot-data.sql
+```
 
-## Preview without authentication
-- `?preview=programme_lead`
-- `?preview=intern`
-- `?preview=management`
+Each intern's Supabase Auth account still needs to be created separately
+(the old `identity_user_id` values won't exist in the new Supabase
+`auth.users` table) — either re-invite each intern via the Interns screen
+(now sends a real invite automatically, closing the gap in REBUILD_SPEC.md
+§5) or use `supabase.auth.admin.inviteUserByEmail` directly for a bulk
+import script.
 
-Optional view examples:
-- `?preview=intern&view=progress`
-- `?preview=intern&view=assistant`
+## What changed in the port (beyond the stack swap)
 
-Preview data is synthetic.
+- **§3 bugs are not reintroduced.** The single delegated `submit` listener
+  (`FORM_HANDLERS`/`registerForm`) is unchanged in `public/app.js`. The
+  `updated_by_identity_user_id` column exists on every table that needs it
+  from the first migration — there is no more drift between what the code
+  queries and what the database has, because this file *is* the schema.
+- **§4 gap closed:** `functions/api/_handlers.js` adds `supervisionFeed()`
+  and `hoursFeed()` (routes `GET /api/supervision-feed`, `GET
+  /api/hours-feed`) — a combined, cross-intern view for programme_lead/
+  supervisor. In the UI, opening Supervision or Activity Log without picking
+  an intern from the switcher now shows this combined feed instead of just
+  "select an intern first."
+- **§5 gap closed:** `interns()` in `_handlers.js` calls
+  `supabase.auth.admin.inviteUserByEmail` when a genuinely new intern
+  profile is created, so adding an intern sends their sign-in invitation
+  immediately — no separate manual step in a different dashboard.
+- **Demo/preview mode is unchanged** (`?preview=intern|programme_lead|management`,
+  or localhost) — still pure client-side fake data, no backend calls.
 
-## Erin pilot data
+## Architecture note: why `postgres` + Supabase Auth, not RLS + supabase-js everywhere
 
-The preview build now includes the first real pilot: Erin George's SACAP 2026 logbook, imported in a privacy-preserving summary form. Open `?preview=programme_lead` or `?preview=intern&view=progress` to see her actual requirement profile and recent counselling pace.
+The Pages Function (`functions/api/[[path]].js` → `_handlers.js`) connects
+directly to Postgres with the `postgres` npm package (which has native
+Cloudflare Workers TCP-socket support) using the `service_role`/pooler
+connection string, and does its own authorization in JS — replicating the
+old Netlify Function's `db.pool.query()` + in-JS role checks almost line for
+line. This was a deliberate choice over rewriting the business logic (the
+pace/projection/caseload math in `requirementProgress()`) against the
+supabase-js query builder or as SQL functions: the math is intricate and the
+risk of a subtle translation bug was judged higher than the benefit of a
+"more idiomatic Supabase" architecture. Row Level Security is still enabled
+on every table as defense-in-depth (see the migration file), so the
+browser's `anon` key — used only for Supabase Auth (`supabase-js` on the
+frontend) — cannot reach any table directly.
 
-The pilot deliberately distinguishes the SACAP workbook's displayed 502.5 hours from 470.5 hours supported by student-signed rows because some template rows contain pre-filled durations without a student signature. See `pilot/ERIN_PILOT.md` for the category breakdown and data-quality flags.
+If this is ever revisited, the natural next step is converting
+`requirementProgress()` into a Postgres function (`supabase/migrations/
+0002_functions.sql`, called via `.rpc()`) so per-intern requirement
+computation happens in one round trip instead of ~7 queries — a real
+performance win once the intern count grows, but not required for the pilot
+scale this is launching at.
 
+## Deploy checklist (REBUILD_SPEC.md §8)
 
-## v4.2 live-pilot additions (16 September 2026)
-- Erin placement end date: **12 November 2026**.
-- Real weekly rhythm: Monday supervision + Stellenbosch Hospital; Tuesday Don & Pat/Jamestown + psychoeducation; alternating Wednesday Stellenbosch Hospital/Night Shelter; Thursday Idas Valley + SACAP supervision at 12:00; Friday SACAP campus.
-- Planned October community pipeline is visible but does **not** count as completed hours until logged.
-- Built-in **Pilot feedback** screen for Erin; feedback can be reviewed during supervision and used to iterate the Hub.
-- Intern home screen has been rebalanced so the **handbook + help + supervision + weekly practicum flow** remain central, with tracking integrated rather than dominating the experience.
+1. ✅ Supabase project + Cloudflare Pages project on the work account.
+2. ✅ Schema migration (`0001_init.sql`) — apply before anything else.
+3. ⬜ Export real pilot data from the old Netlify DB and import (see above).
+4. ✅ Frontend ported.
+5. ✅ Netlify Identity → Supabase Auth.
+6. ✅ Auto-invite on intern creation.
+7. ⬜ Point your domain at the Cloudflare Pages project.
+8. ⬜ Keep the old Netlify site live until this one is verified end-to-end
+   with a real login, then decommission it.

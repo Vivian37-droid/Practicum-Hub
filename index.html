@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Stellenbosch RC Practicum Hub</title>
+  <meta name="description" content="Registered Counsellor practicum management, supervision and learning hub for the Stellenbosch Subdistrict.">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="toast"></div>
+<section id="auth">
+  <div class="auth-wrap">
+  <div class="auth-intro">
+    <span class="eyebrow">Stellenbosch Subdistrict</span>
+    <h1>Practicum support that keeps the whole placement in view.</h1>
+    <p>One secure workspace for referrals, supervision, requirements, placement activity and the practicum handbook.</p>
+    <div class="trust-note"><b>Privacy by design</b><span>Use de-identified case and referral codes only.</span></div>
+  </div>
+  <div class="auth-card">
+    <div class="brandline"><div class="brand">RC</div><div><b>Practicum Hub</b><small>Registered Counsellor Programme</small></div></div>
+    <h2>Welcome back</h2>
+    <p>Sign in with the account linked to your invitation.</p>
+    <form id="login">
+      <label>Email<input id="email" type="email" required></label>
+      <label>Password<input id="password" type="password" required></label>
+      <button>Sign in</button>
+    </form>
+    <form id="setPassword" class="hidden">
+      <p id="setPasswordMessage"><b>Finish setting up your account</b><br>Create a password to accept your invitation.</p>
+      <label>New password<input id="newPassword" type="password" minlength="8" required></label>
+      <label>Confirm password<input id="confirmPassword" type="password" minlength="8" required></label>
+      <button>Save password and continue</button>
+    </form>
+    <div id="authErr" class="notice danger hidden"></div>
+    <div id="preview" class="preview hidden"><b>Preview mode</b><div><button data-preview="programme_lead">Supervisor</button><button data-preview="intern">Intern</button><button data-preview="management">Management</button></div></div>
+    <small>Invite-only. Never enter patient names, ID numbers, contact details, addresses or clinical narrative.</small>
+  </div>
+  </div>
+</section>
+
+<div id="app" class="shell hidden">
+  <aside>
+    <div class="sidebrand"><div class="brand">RC</div><div><b>Practicum Hub</b><small>Stellenbosch Subdistrict</small></div></div>
+    <nav id="nav"></nav>
+    <div class="partner-mini"><span>Programme partners</span><div><img src="https://www.sacap.edu.za/wp-content/themes/greenbox/svg/sacap.svg" alt="SACAP"><img src="https://cornerstone.ac.za/wp-content/smush-webp/2021/09/cornerstone-logo.652f4c98.png.webp" alt="Cornerstone Institute"></div></div>
+    <div class="foot"><div id="me"></div><button id="logout" class="link">Sign out</button></div>
+  </aside>
+  <main>
+    <header>
+      <button id="menu">☰</button>
+      <div><small id="role"></small><h2 id="title">Dashboard</h2></div>
+      <span></span>
+      <button id="quickHelp" class="help-pill">Help / I’m stuck</button>
+      <button id="emergency" class="red">Emergency guide</button>
+    </header>
+    <div class="institution-strip" aria-label="Programme organisations">
+      <a href="https://www.westerncape.gov.za/" target="_blank" rel="noopener"><img src="https://www.westerncape.gov.za/themes/custom/wcg2023/images/logo.svg" alt="Western Cape Government"></a>
+      <span></span>
+      <a href="https://www.sacap.edu.za/" target="_blank" rel="noopener"><img src="https://www.sacap.edu.za/wp-content/themes/greenbox/svg/sacap.svg" alt="SACAP"></a>
+      <a href="https://cornerstone.ac.za/" target="_blank" rel="noopener"><img src="https://cornerstone.ac.za/wp-content/smush-webp/2021/09/cornerstone-logo.652f4c98.png.webp" alt="Cornerstone Institute"></a>
+    </div>
+    <section id="content"></section>
+  </main>
+</div>
+
+<div id="modal" class="modal"><div class="modal-card"><div class="modal-head"><h3 id="modalTitle"></h3><button id="modalClose">×</button></div><div id="modalBody"></div></div></div>
+
+<div id="em" class="modal">
+  <div class="modal-card wide">
+    <div class="modal-head redbg"><h3>Emergency Quick Reference</h3><button id="emClose">×</button></div>
+    <div class="emgrid">
+      <article><b>Suicide / self-harm</b><p>Assess immediately, do not leave the person alone where imminent risk is suspected, escalate to senior clinical/medical staff and document the actions taken.</p></article>
+      <article><b>Violence / threat</b><p>Prioritise safety. Do not manage an acute threat alone. Use senior staff, security and emergency pathways.</p></article>
+      <article><b>Acute psychosis / severe disturbance</b><p>Seek medical/psychiatric assessment promptly. Maintain calm and avoid confrontation.</p></article>
+      <article><b>Child protection / abuse</b><p>Follow safeguarding and mandatory reporting requirements; escalate immediately and document facts.</p></article>
+      <article><b>Medical emergency</b><p>Stop counselling and activate the facility medical emergency process.</p></article>
+      <article><b>When unsure</b><p>Stay within Registered Counsellor scope. Escalate early and record who was contacted and what was decided.</p></article>
+    </div>
+  </div>
+</div>
+
+<script src="/config.js"></script>
+<script src="/handbook-data.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
