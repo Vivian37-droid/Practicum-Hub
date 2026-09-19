@@ -44,6 +44,15 @@ export function requireMethod(method, allowed) {
   if (!allowed.includes(method)) throw new HttpError(405, 'Method not allowed');
 }
 
+// Every Supabase call (via .from() or .rpc()) now goes over PostgREST/HTTP
+// and returns a { data, error } shape instead of throwing. This unwraps
+// that shape consistently, turning any Postgres/PostgREST error into an
+// HttpError so it surfaces the same way a failed raw `sql` query used to.
+export function unwrap({ data, error }) {
+  if (error) throw new HttpError(500, error.message || 'Database error');
+  return data;
+}
+
 export function requireSameOrigin(request) {
   if (['GET', 'HEAD'].includes(request.method)) return;
   const origin = request.headers.get('origin');
