@@ -22,7 +22,7 @@ export const monthEnd = start => { const d = new Date(`${start}T00:00:00Z`); d.s
 export const CASE_STATUSES = new Set(['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited']);
 export const SUPERVISION_STATUSES = new Set(['Open', 'Reviewed', 'Closed']);
 export const SUPERVISION_PRIORITIES = new Set(['Routine', 'Important', 'Risk / urgent']);
-export const SESSION_TYPES = new Set(['First', 'Follow-up']);
+export const SESSION_TYPES = new Set(['Intake', 'Follow-up', 'Termination']);
 export const GENDERS = new Set(['Female', 'Male', 'Other', 'Unknown']);
 export const REFERRAL_STATUSES = new Set(['Allocated', 'Contact attempted', 'Contact made', 'Booked', 'Intake completed', 'Active', 'Awaiting feedback', 'Closed – completed', 'Closed – no contact', 'Reallocated']);
 export const REFERRAL_PRIORITIES = new Set(['Routine', 'Priority', 'Urgent']);
