@@ -1,8 +1,16 @@
-// View handlers — a near line-for-line port of the corresponding functions
-// in the old netlify/functions/api.mjs (dashboard, interns, requirements,
-// cases, encounters, hours, supervision, competencies, reports, referrals,
-// pilotContext, feedback, programme), using postgres.js tagged-template
-// queries against Supabase instead of node-postgres's pool.query($1,$2,...).
+// View handlers — a port of the corresponding functions in the old
+// netlify/functions/api.mjs (dashboard, interns, requirements, cases,
+// encounters, hours, supervision, competencies, reports, referrals,
+// pilotContext, feedback, programme).
+//
+// As of the PostgREST migration, these no longer run raw `sql`
+// tagged-template queries over a direct TCP Postgres connection (which was
+// unreliable from Cloudflare Pages Functions — see clients.js). Simple
+// single-table reads/writes use supabase-js's `.from()` query builder;
+// joins PostgREST can't embed cleanly, multi-row aggregates, and
+// conditional/only-once-set-timestamp updates call the Postgres functions
+// defined in supabase/migrations/0002_rpc_functions.sql via `.rpc()`.
+// Every call is still exactly one HTTP round trip.
 //
 // Two additions beyond the old app, both called out in REBUILD_SPEC.md as
 // things to build in this rebuild rather than defer again:
@@ -10,38 +18,48 @@
 //   - supervisionFeed() / hoursFeed(): cross-intern aggregate views for
 //     programme_lead/supervisor (§4 gap — "no bird's-eye view").
 
-import { getSql, getAdmin } from '../_shared/clients.js';
-import { requireRole, assertInternAccess, audit, loadProfile, ensureRequirementProfile } from '../_shared/context.js';
+import { getAdmin } from '../_shared/clients.js';
+import { requireRole, assertInternAccess, audit, loadProfile } from '../_shared/context.js';
 import {
-  HttpError, num, round, dateValue, limited, requireMethod, cleanEmail,
+  HttpError, num, round, dateValue, limited, requireMethod, cleanEmail, unwrap,
   monthEnd, CASE_STATUSES, SUPERVISION_STATUSES, SUPERVISION_PRIORITIES,
   SESSION_TYPES, GENDERS, REFERRAL_STATUSES, REFERRAL_PRIORITIES
 } from '../_shared/util.js';
 
+// Flattens a PostgREST-embedded `profiles(display_name)` (or
+// `profiles!inner(...)`) relation into a top-level `intern_name` field,
+// matching the shape the old `JOIN profiles p ... p.display_name intern_name`
+// queries returned.
+function withInternName(rows) {
+  return (rows || []).map(r => {
+    const { profiles, ...rest } = r;
+    return { ...rest, intern_name: profiles?.display_name ?? null };
+  });
+}
+
+// The old SQL ordered referrals by `COALESCE(next_action_date, referral_date)
+// DESC`, which PostgREST's `.order()` can't express directly (it orders by a
+// single real column). Sorting client-side after fetching in created_at-desc
+// order keeps the same effective ordering, since JS's sort is stable.
+function sortReferrals(rows) {
+  return rows.sort((a, b) => new Date(b.next_action_date || b.referral_date) - new Date(a.next_action_date || a.referral_date));
+}
+
 async function requirementProgress(env, id) {
-  const sql = getSql(env);
-  const profile = await loadProfile(env, id);
-  const components = await sql`SELECT * FROM requirement_components WHERE requirement_profile_id = ${profile.requirement_profile_id} ORDER BY sort_order, name`;
-  const manual = await sql`
-    SELECT component_code, SUM(hours)::float total,
-      SUM(hours) FILTER(WHERE work_date >= CURRENT_DATE - 27)::float recent_28d
-    FROM hours WHERE intern_profile_id = ${id} AND component_code IS NOT NULL GROUP BY component_code`;
-  const manualMap = Object.fromEntries(manual.map(x => [x.component_code, { total: num(x.total), recent: num(x.recent_28d) }]));
-  const [encounter] = await sql`
-    SELECT COALESCE(SUM(duration_minutes) FILTER(WHERE attended), 0)::float minutes,
-      COUNT(*)::int booked, COUNT(*) FILTER(WHERE attended)::int attended,
-      AVG(duration_minutes) FILTER(WHERE attended AND duration_minutes > 0)::float avg_minutes
-    FROM encounters WHERE intern_profile_id = ${id}`;
-  const [recentEncounter] = await sql`
-    SELECT COALESCE(SUM(duration_minutes) FILTER(WHERE attended), 0)::float minutes
-    FROM encounters WHERE intern_profile_id = ${id} AND encounter_date >= CURRENT_DATE - 27`;
-  const [activeCases] = await sql`
-    SELECT COUNT(*)::int n, COALESCE(SUM(1.0 / NULLIF(planned_frequency_weeks, 0)), 0)::float weekly_bookings
-    FROM cases WHERE intern_profile_id = ${id} AND status IN ('Booked','Intake','Active','Exit review')`;
-  const deliverables = await sql`SELECT component_id, status, note FROM deliverable_progress WHERE intern_profile_id = ${id}`;
-  const deliverableMap = Object.fromEntries(deliverables.map(x => [x.component_id, x]));
-  const opening = await sql`SELECT component_id, hours::float hours, note FROM requirement_opening_balances WHERE intern_profile_id = ${id}`;
-  const openingMap = Object.fromEntries(opening.map(x => [x.component_id, x]));
+  const admin = getAdmin(env);
+  const { data, error } = await admin.rpc('requirement_progress_data', { p_intern_id: id });
+  if (error) {
+    if (/Intern not found/i.test(error.message || '')) throw new HttpError(404, 'Intern not found');
+    throw new HttpError(500, error.message);
+  }
+  const profile = data.profile;
+  const components = data.components || [];
+  const manualMap = data.manual || {};
+  const encounter = data.encounter || {};
+  const recentEncounter = data.recent_encounter || {};
+  const activeCases = data.active_cases || {};
+  const deliverableMap = data.deliverables || {};
+  const openingMap = data.opening || {};
 
   const start = profile.placement_start ? new Date(profile.placement_start) : null;
   const end = profile.placement_end ? new Date(profile.placement_end) : null;
@@ -172,22 +190,21 @@ async function requirementProgress(env, id) {
 
 export async function dashboard(ctx, env) {
   if (ctx.role === 'management') return programme(ctx, env);
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   if (ctx.role === 'intern') {
-    const [[cases], [supervision]] = await Promise.all([
-      sql`SELECT COUNT(*)::int n FROM cases WHERE intern_profile_id = ${ctx.profile.id} AND status <> 'Exited'`,
-      sql`SELECT COUNT(*)::int n FROM supervision_items WHERE intern_profile_id = ${ctx.profile.id} AND status = 'Open'`
+    const [casesRes, supervisionRes] = await Promise.all([
+      admin.from('cases').select('id', { count: 'exact', head: true }).eq('intern_profile_id', ctx.profile.id).neq('status', 'Exited'),
+      admin.from('supervision_items').select('id', { count: 'exact', head: true }).eq('intern_profile_id', ctx.profile.id).eq('status', 'Open')
     ]);
+    if (casesRes.error) throw new HttpError(500, casesRes.error.message);
+    if (supervisionRes.error) throw new HttpError(500, supervisionRes.error.message);
     const requirements = await requirementProgress(env, ctx.profile.id);
-    return { profile: ctx.profile, requirements, metrics: { active_cases: cases.n, open_supervision: supervision.n } };
+    return { profile: ctx.profile, requirements, metrics: { active_cases: casesRes.count, open_supervision: supervisionRes.count } };
   }
   requireRole(ctx, ['programme_lead', 'supervisor']);
-  const supervisorFilter = ctx.role === 'supervisor' ? sql`AND supervisor_identity_user_id = ${ctx.user.id}` : sql``;
-  let interns = await sql`
-    SELECT p.*,
-      COALESCE((SELECT COUNT(*) FROM cases x WHERE x.intern_profile_id = p.id AND x.status <> 'Exited'), 0)::int active_cases,
-      COALESCE((SELECT COUNT(*) FROM supervision_items s WHERE s.intern_profile_id = p.id AND s.status = 'Open'), 0)::int open_supervision
-    FROM profiles p WHERE role = 'intern' AND active = true ${supervisorFilter} ORDER BY display_name`;
+  const supervisorId = ctx.role === 'supervisor' ? ctx.user.id : null;
+  const listRows = unwrap(await admin.rpc('list_interns_with_counts', { p_supervisor_id: supervisorId, p_only_active: true }));
+  let interns = (listRows || []).map(r => r.profile);
   interns = await Promise.all(interns.map(async p => {
     const req = await requirementProgress(env, p.id);
     return { ...p, requirements: req.summary, requirement_profile_name: req.profile.requirement_profile_name };
@@ -203,16 +220,13 @@ export async function dashboard(ctx, env) {
 
 export async function interns(ctx, env, body, method) {
   requireRole(ctx, ['programme_lead', 'supervisor']);
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   if (method === 'GET') {
-    const supervisorFilter = ctx.role === 'supervisor' ? sql`AND supervisor_identity_user_id = ${ctx.user.id}` : sql``;
-    let rows = await sql`
-      SELECT p.*,
-        COALESCE((SELECT COUNT(*) FROM cases x WHERE x.intern_profile_id = p.id AND x.status <> 'Exited'), 0)::int active_cases,
-        COALESCE((SELECT COUNT(*) FROM supervision_items s WHERE s.intern_profile_id = p.id AND s.status = 'Open'), 0)::int open_supervision
-      FROM profiles p WHERE role = 'intern' ${supervisorFilter} ORDER BY active DESC, display_name`;
-    rows = await Promise.all(rows.map(async p => ({ ...p, requirement_summary: (await requirementProgress(env, p.id)).summary })));
-    return rows;
+    const supervisorId = ctx.role === 'supervisor' ? ctx.user.id : null;
+    const listRows = unwrap(await admin.rpc('list_interns_with_counts', { p_supervisor_id: supervisorId, p_only_active: false }));
+    let list = (listRows || []).map(r => r.profile);
+    list = await Promise.all(list.map(async p => ({ ...p, requirement_summary: (await requirementProgress(env, p.id)).summary })));
+    return list;
   }
   requireRole(ctx, ['programme_lead']);
   const email = cleanEmail(body.email);
@@ -220,16 +234,17 @@ export async function interns(ctx, env, body, method) {
   if (!email || !name) throw new HttpError(400, 'Name and email are required');
   const institution = body.institution || 'Other';
   const code = institution === 'SACAP' ? 'sacap-bpsych' : institution === 'Cornerstone Institute' ? 'cornerstone-bpsych' : 'generic-720';
-  const [rp] = await sql`SELECT id, overall_programme_hours FROM requirement_profiles WHERE code = ${code}`;
-  const wasExisting = !!(await sql`SELECT 1 FROM profiles WHERE email = ${email}`)[0];
-  const [row] = await sql`
-    INSERT INTO profiles(email, display_name, role, institution, placement_start, placement_end, required_hours, requirement_profile_id, supervisor_identity_user_id, default_session_minutes)
-    VALUES (${email}, ${name}, 'intern', ${institution}, ${body.placement_start || null}, ${body.placement_end || null}, ${num(rp?.overall_programme_hours || 720)}, ${rp?.id || null}, ${ctx.user.id}, ${num(body.default_session_minutes || 60)})
-    ON CONFLICT(email) DO UPDATE SET display_name = EXCLUDED.display_name, institution = EXCLUDED.institution,
-      placement_start = EXCLUDED.placement_start, placement_end = EXCLUDED.placement_end, required_hours = EXCLUDED.required_hours,
-      requirement_profile_id = EXCLUDED.requirement_profile_id, supervisor_identity_user_id = EXCLUDED.supervisor_identity_user_id,
-      default_session_minutes = EXCLUDED.default_session_minutes, active = true
-    RETURNING *`;
+  const result = unwrap(await admin.rpc('upsert_intern', {
+    p_email: email,
+    p_name: name,
+    p_institution: institution,
+    p_code: code,
+    p_placement_start: body.placement_start || null,
+    p_placement_end: body.placement_end || null,
+    p_default_minutes: num(body.default_session_minutes || 60),
+    p_supervisor_id: ctx.user.id
+  }));
+  const { was_existing: wasExisting, ...row } = result;
   await audit(ctx, env, 'create_or_update', 'intern', row.id, { institution }, row.id);
 
   // §5 fix: sending the invite is no longer a separate manual step in a
@@ -237,7 +252,6 @@ export async function interns(ctx, env, body, method) {
   let invite = { sent: false, reason: null };
   if (!wasExisting) {
     try {
-      const admin = getAdmin(env);
       const { error } = await admin.auth.admin.inviteUserByEmail(email, {
         data: { display_name: name, roles: ['intern'] },
         redirectTo: env.PUBLIC_SITE_URL ? `${env.PUBLIC_SITE_URL}/` : undefined
@@ -252,36 +266,44 @@ export async function interns(ctx, env, body, method) {
 }
 
 export async function requirements(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') return requirementProgress(env, id);
   if (method === 'PATCH') {
-    const [component] = await sql`
-      SELECT c.* FROM requirement_components c JOIN profiles p ON p.requirement_profile_id = c.requirement_profile_id
-      WHERE c.id = ${Number(body.component_id)} AND p.id = ${id}`;
+    const { data: internRow, error: internErr } = await admin.from('profiles').select('requirement_profile_id').eq('id', id).maybeSingle();
+    if (internErr) throw new HttpError(500, internErr.message);
+    const { data: component, error: compErr } = await admin.from('requirement_components').select('*')
+      .eq('id', Number(body.component_id))
+      .eq('requirement_profile_id', internRow?.requirement_profile_id ?? -1)
+      .maybeSingle();
+    if (compErr) throw new HttpError(500, compErr.message);
     if (!component) throw new HttpError(400, 'Requirement component not found');
     if (body.action === 'opening_balance') {
       requireRole(ctx, ['programme_lead', 'supervisor']);
       const value = num(body.hours);
       if (value < 0 || value > 2000) throw new HttpError(400, 'Invalid opening balance');
-      const [row] = await sql`
-        INSERT INTO requirement_opening_balances(intern_profile_id, component_id, hours, note, updated_by_identity_user_id)
-        VALUES (${id}, ${component.id}, ${value}, ${body.note || 'Opening balance from existing institutional logbook'}, ${ctx.user.id})
-        ON CONFLICT(intern_profile_id, component_id) DO UPDATE SET hours = EXCLUDED.hours, note = EXCLUDED.note,
-          updated_by_identity_user_id = EXCLUDED.updated_by_identity_user_id, updated_at = NOW()
-        RETURNING *`;
+      const row = unwrap(await admin.from('requirement_opening_balances').upsert({
+        intern_profile_id: id,
+        component_id: component.id,
+        hours: value,
+        note: body.note || 'Opening balance from existing institutional logbook',
+        updated_by_identity_user_id: ctx.user.id,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'intern_profile_id,component_id' }).select().single());
       await audit(ctx, env, 'update', 'opening_balance', row.id, { component: component.code, hours: value }, id);
       return row;
     }
     if (component.calculation_mode !== 'deliverable') throw new HttpError(400, 'Deliverable not found');
     const status = ['Not started', 'In progress', 'Complete'].includes(body.status) ? body.status : 'Not started';
-    const [row] = await sql`
-      INSERT INTO deliverable_progress(intern_profile_id, component_id, status, note, updated_by_identity_user_id)
-      VALUES (${id}, ${component.id}, ${status}, ${body.note || null}, ${ctx.user.id})
-      ON CONFLICT(intern_profile_id, component_id) DO UPDATE SET status = EXCLUDED.status, note = EXCLUDED.note,
-        updated_by_identity_user_id = EXCLUDED.updated_by_identity_user_id, updated_at = NOW()
-      RETURNING *`;
+    const row = unwrap(await admin.from('deliverable_progress').upsert({
+      intern_profile_id: id,
+      component_id: component.id,
+      status,
+      note: body.note || null,
+      updated_by_identity_user_id: ctx.user.id,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'intern_profile_id,component_id' }).select().single());
     await audit(ctx, env, 'update', 'deliverable', row.id, { status }, id);
     return row;
   }
@@ -289,16 +311,21 @@ export async function requirements(ctx, env, url, body, method) {
 }
 
 export async function cases(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   if (method === 'GET') {
     if (id) {
       await assertInternAccess(ctx, id, env);
-      return sql`SELECT x.*, p.display_name intern_name FROM cases x JOIN profiles p ON p.id = x.intern_profile_id WHERE intern_profile_id = ${id} ORDER BY updated_at DESC`;
+      const rows = unwrap(await admin.from('cases').select('*, profiles(display_name)').eq('intern_profile_id', id).order('updated_at', { ascending: false }));
+      return withInternName(rows);
     }
     requireRole(ctx, ['programme_lead', 'supervisor']);
-    if (ctx.role === 'supervisor') return sql`SELECT x.*, p.display_name intern_name FROM cases x JOIN profiles p ON p.id = x.intern_profile_id WHERE p.supervisor_identity_user_id = ${ctx.user.id} ORDER BY x.updated_at DESC`;
-    return sql`SELECT x.*, p.display_name intern_name FROM cases x JOIN profiles p ON p.id = x.intern_profile_id ORDER BY x.updated_at DESC`;
+    let q = admin.from('cases')
+      .select(ctx.role === 'supervisor' ? '*, profiles!inner(display_name, supervisor_identity_user_id)' : '*, profiles(display_name)')
+      .order('updated_at', { ascending: false });
+    if (ctx.role === 'supervisor') q = q.eq('profiles.supervisor_identity_user_id', ctx.user.id);
+    const rows = unwrap(await q);
+    return withInternName(rows);
   }
   if (method === 'POST') {
     requireRole(ctx, ['programme_lead', 'supervisor']);
@@ -310,14 +337,21 @@ export async function cases(ctx, env, url, body, method) {
     const frequency = Number(body.planned_frequency_weeks || 1);
     if (!CASE_STATUSES.has(status)) throw new HttpError(400, 'Invalid case status');
     if (!Number.isInteger(frequency) || frequency < 1 || frequency > 52) throw new HttpError(400, 'Invalid planned frequency');
-    const [row] = await sql`
-      INSERT INTO cases(case_code, intern_profile_id, site, presenting_category, status, planned_frequency_weeks, created_by_identity_user_id)
-      VALUES (${caseCode}, ${id}, ${site}, ${category}, ${status}, ${frequency}, ${ctx.user.id}) RETURNING *`;
+    const row = unwrap(await admin.from('cases').insert({
+      case_code: caseCode,
+      intern_profile_id: id,
+      site,
+      presenting_category: category,
+      status,
+      planned_frequency_weeks: frequency,
+      created_by_identity_user_id: ctx.user.id
+    }).select().single());
     await audit(ctx, env, 'create', 'case', row.id, null, id);
     return row;
   }
   if (method === 'PATCH') {
-    const [row] = await sql`SELECT * FROM cases WHERE id = ${Number(body.id)}`;
+    const { data: row, error } = await admin.from('cases').select('*').eq('id', Number(body.id)).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Case not found');
     await assertInternAccess(ctx, row.intern_profile_id, env);
     const status = body.status || row.status;
@@ -325,15 +359,12 @@ export async function cases(ctx, env, url, body, method) {
     const requestedFrequency = body.planned_frequency_weeks == null ? null : Number(body.planned_frequency_weeks);
     if (requestedFrequency != null && (ctx.role === 'intern' || !Number.isInteger(requestedFrequency) || requestedFrequency < 1 || requestedFrequency > 52)) throw new HttpError(403, 'Only a supervisor can change planned frequency');
     const supervisionStatus = limited(body.supervision_status, 60, 'Supervision status');
-    const [updated] = await sql`
-      UPDATE cases SET status = ${status}, supervision_status = COALESCE(${supervisionStatus}, supervision_status),
-        planned_frequency_weeks = COALESCE(${requestedFrequency}, planned_frequency_weeks),
-        first_contact_at = CASE WHEN ${status} IN ('Contact attempted','Booked','Intake','Active','Exit review','Exited') THEN COALESCE(first_contact_at, NOW()) ELSE first_contact_at END,
-        booked_at = CASE WHEN ${status} IN ('Booked','Intake','Active','Exit review','Exited') THEN COALESCE(booked_at, NOW()) ELSE booked_at END,
-        intake_at = CASE WHEN ${status} IN ('Intake','Active','Exit review','Exited') THEN COALESCE(intake_at, NOW()) ELSE intake_at END,
-        exited_at = CASE WHEN ${status} = 'Exited' THEN COALESCE(exited_at, NOW()) ELSE exited_at END,
-        updated_at = NOW()
-      WHERE id = ${row.id} RETURNING *`;
+    const updated = unwrap(await admin.rpc('update_case_status', {
+      p_case_id: row.id,
+      p_status: status,
+      p_supervision_status: supervisionStatus,
+      p_frequency: requestedFrequency
+    }));
     await audit(ctx, env, 'update', 'case', row.id, { status, planned_frequency_weeks: updated.planned_frequency_weeks }, row.intern_profile_id);
     return updated;
   }
@@ -341,12 +372,17 @@ export async function cases(ctx, env, url, body, method) {
 }
 
 export async function encounters(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
-  if (method === 'GET') return sql`SELECT e.*, x.case_code FROM encounters e JOIN cases x ON x.id = e.case_id WHERE e.intern_profile_id = ${id} ORDER BY encounter_date DESC, created_at DESC`;
+  if (method === 'GET') {
+    const rows = unwrap(await admin.from('encounters').select('*, cases(case_code)').eq('intern_profile_id', id)
+      .order('encounter_date', { ascending: false }).order('created_at', { ascending: false }));
+    return rows.map(r => { const { cases: c, ...rest } = r; return { ...rest, case_code: c?.case_code ?? null }; });
+  }
   requireMethod(method, ['POST']);
-  const [theCase] = await sql`SELECT * FROM cases WHERE id = ${Number(body.case_id)}`;
+  const { data: theCase, error: caseErr } = await admin.from('cases').select('*').eq('id', Number(body.case_id)).maybeSingle();
+  if (caseErr) throw new HttpError(500, caseErr.message);
   if (!theCase || theCase.intern_profile_id !== id) throw new HttpError(400, 'Case does not belong to this intern');
   const booked = String(body.booked) !== 'false';
   const attended = String(body.attended) !== 'false';
@@ -356,46 +392,57 @@ export async function encounters(ctx, env, url, body, method) {
   if (!SESSION_TYPES.has(body.session_type)) throw new HttpError(400, 'Invalid session type');
   const gender = body.patient_gender || 'Unknown';
   if (!GENDERS.has(gender)) throw new HttpError(400, 'Invalid gender value');
-  const [row] = await sql`
-    INSERT INTO encounters(case_id, intern_profile_id, encounter_date, booked, attended, session_type, patient_gender, site, duration_minutes, created_by_identity_user_id)
-    VALUES (${theCase.id}, ${id}, ${dateValue(body.encounter_date, 'Encounter date')}, ${booked}, ${attended}, ${body.session_type}, ${gender}, ${theCase.site}, ${duration}, ${ctx.user.id})
-    RETURNING *`;
-  if (attended) {
-    await sql`
-      UPDATE cases SET sessions = (SELECT COUNT(*) FROM encounters WHERE case_id = ${theCase.id} AND attended = true),
-        status = CASE WHEN status IN ('Allocated','Contact attempted','Booked','Intake') THEN 'Active' ELSE status END,
-        updated_at = NOW()
-      WHERE id = ${theCase.id}`;
-  }
+  const row = unwrap(await admin.rpc('create_encounter', {
+    p_case_id: theCase.id,
+    p_intern_id: id,
+    p_encounter_date: dateValue(body.encounter_date, 'Encounter date'),
+    p_booked: booked,
+    p_attended: attended,
+    p_session_type: body.session_type,
+    p_gender: gender,
+    p_site: theCase.site,
+    p_duration: duration,
+    p_created_by: ctx.user.id
+  }));
   await audit(ctx, env, 'create', 'encounter', row.id, { attended, duration_minutes: duration }, id);
   return row;
 }
 
 export async function hoursView(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
-    const entries = await sql`
-      SELECT h.*, c.name component_name, c.manual_label, c.calculation_mode
-      FROM hours h LEFT JOIN requirement_components c ON c.code = h.component_code AND c.requirement_profile_id = (SELECT requirement_profile_id FROM profiles WHERE id = ${id})
-      WHERE h.intern_profile_id = ${id} ORDER BY work_date DESC, h.created_at DESC LIMIT 300`;
-    const components = await sql`
-      SELECT c.* FROM requirement_components c JOIN profiles p ON p.requirement_profile_id = c.requirement_profile_id
-      WHERE p.id = ${id} AND c.calculation_mode IN ('manual','manual_plus_individual_encounters') ORDER BY c.sort_order`;
+    const entryRows = unwrap(await admin.rpc('hours_entries_with_component', { p_intern_id: id }));
+    const entries = (entryRows || []).map(r => r.entry);
+    const { data: profileRow, error: profErr } = await admin.from('profiles').select('requirement_profile_id').eq('id', id).maybeSingle();
+    if (profErr) throw new HttpError(500, profErr.message);
+    const components = unwrap(await admin.from('requirement_components').select('*')
+      .eq('requirement_profile_id', profileRow?.requirement_profile_id ?? -1)
+      .in('calculation_mode', ['manual', 'manual_plus_individual_encounters'])
+      .order('sort_order'));
     return { entries, components };
   }
   requireMethod(method, ['POST']);
   const value = num(body.hours);
   if (!(value > 0 && value <= 24)) throw new HttpError(400, 'Hours must be greater than 0 and no more than 24');
-  const [component] = await sql`
-    SELECT c.* FROM requirement_components c JOIN profiles p ON p.requirement_profile_id = c.requirement_profile_id
-    WHERE p.id = ${id} AND c.code = ${body.component_code}`;
+  const { data: profileRow2, error: profErr2 } = await admin.from('profiles').select('requirement_profile_id').eq('id', id).maybeSingle();
+  if (profErr2) throw new HttpError(500, profErr2.message);
+  const { data: component, error: compErr } = await admin.from('requirement_components').select('*')
+    .eq('requirement_profile_id', profileRow2?.requirement_profile_id ?? -1)
+    .eq('code', body.component_code)
+    .maybeSingle();
+  if (compErr) throw new HttpError(500, compErr.message);
   if (!component || !['manual', 'manual_plus_individual_encounters'].includes(component.calculation_mode)) throw new HttpError(400, 'Choose a valid activity category');
-  const [row] = await sql`
-    INSERT INTO hours(intern_profile_id, work_date, category, component_code, hours, note, created_by_identity_user_id)
-    VALUES (${id}, ${dateValue(body.work_date, 'Work date')}, ${component.name}, ${component.code}, ${value}, ${limited(body.note, 1000, 'Note')}, ${ctx.user.id})
-    RETURNING *`;
+  const row = unwrap(await admin.from('hours').insert({
+    intern_profile_id: id,
+    work_date: dateValue(body.work_date, 'Work date'),
+    category: component.name,
+    component_code: component.code,
+    hours: value,
+    note: limited(body.note, 1000, 'Note'),
+    created_by_identity_user_id: ctx.user.id
+  }).select().single());
   await audit(ctx, env, 'create', 'hours', row.id, { component_code: component.code, hours: value }, id);
   return row;
 }
@@ -405,46 +452,56 @@ export async function hoursView(ctx, env, url, body, method) {
 // via the intern switcher.
 export async function hoursFeed(ctx, env) {
   requireRole(ctx, ['programme_lead', 'supervisor']);
-  const sql = getSql(env);
-  const supervisorFilter = ctx.role === 'supervisor' ? sql`AND p.supervisor_identity_user_id = ${ctx.user.id}` : sql``;
-  return sql`
-    SELECT h.*, p.display_name intern_name, c.name component_name, c.manual_label
-    FROM hours h JOIN profiles p ON p.id = h.intern_profile_id
-    LEFT JOIN requirement_components c ON c.code = h.component_code AND c.requirement_profile_id = p.requirement_profile_id
-    WHERE p.role = 'intern' ${supervisorFilter}
-    ORDER BY h.work_date DESC, h.created_at DESC LIMIT 300`;
+  const admin = getAdmin(env);
+  const rows = unwrap(await admin.rpc('hours_feed', { p_supervisor_id: ctx.role === 'supervisor' ? ctx.user.id : null }));
+  return (rows || []).map(r => r.entry);
 }
 
 export async function supervision(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   if (method === 'PATCH') {
     requireRole(ctx, ['programme_lead', 'supervisor']);
-    const [row] = await sql`SELECT * FROM supervision_items WHERE id = ${Number(body.id)}`;
+    const { data: row, error } = await admin.from('supervision_items').select('*').eq('id', Number(body.id)).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Supervision item not found');
     await assertInternAccess(ctx, row.intern_profile_id, env);
     const status = body.status || row.status;
     if (!SUPERVISION_STATUSES.has(status)) throw new HttpError(400, 'Invalid supervision status');
     const note = body.supervisor_note == null ? row.supervisor_note : limited(body.supervisor_note, 3000, 'Supervisor response');
-    const [updated] = await sql`UPDATE supervision_items SET supervisor_note = ${note}, status = ${status}, updated_at = NOW() WHERE id = ${row.id} RETURNING *`;
+    const updated = unwrap(await admin.from('supervision_items').update({
+      supervisor_note: note, status, updated_at: new Date().toISOString()
+    }).eq('id', row.id).select().single());
     return updated;
   }
   await assertInternAccess(ctx, id, env);
-  if (method === 'GET') return sql`
-    SELECT s.*, x.case_code FROM supervision_items s LEFT JOIN cases x ON x.id = s.case_id
-    WHERE s.intern_profile_id = ${id} ORDER BY CASE WHEN s.status = 'Open' THEN 0 ELSE 1 END, created_at DESC`;
+  if (method === 'GET') {
+    const rows = unwrap(await admin.from('supervision_items').select('*, cases(case_code)').eq('intern_profile_id', id).order('created_at', { ascending: false }));
+    const mapped = rows.map(r => { const { cases: c, ...rest } = r; return { ...rest, case_code: c?.case_code ?? null }; });
+    // Old SQL: ORDER BY CASE WHEN status = 'Open' THEN 0 ELSE 1 END, created_at DESC.
+    // Array#sort is stable, so sorting the already created_at-desc-ordered
+    // rows by "Open first" reproduces the same ordering.
+    mapped.sort((a, b) => (a.status === 'Open' ? 0 : 1) - (b.status === 'Open' ? 0 : 1));
+    return mapped;
+  }
   requireMethod(method, ['POST']);
   const priority = body.priority || 'Routine';
   if (!SUPERVISION_PRIORITIES.has(priority)) throw new HttpError(400, 'Invalid supervision priority');
   const caseId = body.case_id ? Number(body.case_id) : null;
   if (caseId) {
-    const [linkedCase] = await sql`SELECT 1 FROM cases WHERE id = ${caseId} AND intern_profile_id = ${id}`;
+    const { data: linkedCase, error: linkErr } = await admin.from('cases').select('id').eq('id', caseId).eq('intern_profile_id', id).maybeSingle();
+    if (linkErr) throw new HttpError(500, linkErr.message);
     if (!linkedCase) throw new HttpError(400, 'Case does not belong to this intern');
   }
-  const [row] = await sql`
-    INSERT INTO supervision_items(intern_profile_id, case_id, topic, question, priority, action_taken, created_by_identity_user_id)
-    VALUES (${id}, ${caseId}, ${limited(body.topic, 200, 'Topic', true)}, ${limited(body.question, 3000, 'Question', true)}, ${priority}, ${limited(body.action_taken, 3000, 'Action taken')}, ${ctx.user.id})
-    RETURNING *`;
+  const row = unwrap(await admin.from('supervision_items').insert({
+    intern_profile_id: id,
+    case_id: caseId,
+    topic: limited(body.topic, 200, 'Topic', true),
+    question: limited(body.question, 3000, 'Question', true),
+    priority,
+    action_taken: limited(body.action_taken, 3000, 'Action taken'),
+    created_by_identity_user_id: ctx.user.id
+  }).select().single());
   await audit(ctx, env, 'create', 'supervision', row.id, { priority: row.priority }, id);
   return row;
 }
@@ -453,113 +510,109 @@ export async function supervision(ctx, env, url, body, method) {
 // programme_lead / supervisor.
 export async function supervisionFeed(ctx, env) {
   requireRole(ctx, ['programme_lead', 'supervisor']);
-  const sql = getSql(env);
-  const supervisorFilter = ctx.role === 'supervisor' ? sql`AND p.supervisor_identity_user_id = ${ctx.user.id}` : sql``;
-  return sql`
-    SELECT s.*, x.case_code, p.display_name intern_name
-    FROM supervision_items s JOIN profiles p ON p.id = s.intern_profile_id LEFT JOIN cases x ON x.id = s.case_id
-    WHERE p.role = 'intern' ${supervisorFilter}
-    ORDER BY CASE WHEN s.status = 'Open' THEN 0 ELSE 1 END, s.created_at DESC LIMIT 300`;
+  const admin = getAdmin(env);
+  const rows = unwrap(await admin.rpc('supervision_feed', { p_supervisor_id: ctx.role === 'supervisor' ? ctx.user.id : null }));
+  return (rows || []).map(r => r.item);
 }
 
 export async function competencies(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
-  if (method === 'GET') return sql`
-    SELECT d.*, p.intern_rating, p.supervisor_rating, p.evidence, p.supervisor_comment
-    FROM competency_definitions d LEFT JOIN competency_progress p ON p.competency_id = d.id AND p.intern_profile_id = ${id}
-    ORDER BY sort_order`;
+  if (method === 'GET') {
+    const rows = unwrap(await admin.from('competency_definitions')
+      .select('*, competency_progress(intern_rating, supervisor_rating, evidence, supervisor_comment, intern_profile_id)')
+      .order('sort_order'));
+    return rows.map(d => {
+      const { competency_progress, ...rest } = d;
+      const p = (competency_progress || []).find(x => x.intern_profile_id === id);
+      return {
+        ...rest,
+        intern_rating: p?.intern_rating ?? null,
+        supervisor_rating: p?.supervisor_rating ?? null,
+        evidence: p?.evidence ?? null,
+        supervisor_comment: p?.supervisor_comment ?? null
+      };
+    });
+  }
   requireMethod(method, ['POST']);
-  const [definition] = await sql`SELECT 1 FROM competency_definitions WHERE id = ${Number(body.competency_id)}`;
+  const { data: definition, error: defErr } = await admin.from('competency_definitions').select('id').eq('id', Number(body.competency_id)).maybeSingle();
+  if (defErr) throw new HttpError(500, defErr.message);
   if (!definition) throw new HttpError(400, 'Competency not found');
-  const [old = {}] = await sql`SELECT * FROM competency_progress WHERE intern_profile_id = ${id} AND competency_id = ${body.competency_id}`;
-  const internRating = ctx.role === 'intern' ? (body.intern_rating ?? old.intern_rating) : old.intern_rating;
-  const supervisorRating = ctx.role === 'intern' ? old.supervisor_rating : (body.supervisor_rating ?? old.supervisor_rating);
-  const evidence = ctx.role === 'intern' ? (body.evidence ?? old.evidence) : old.evidence;
-  const comment = ctx.role === 'intern' ? old.supervisor_comment : (body.supervisor_comment ?? old.supervisor_comment);
+  const { data: old, error: oldErr } = await admin.from('competency_progress').select('*')
+    .eq('intern_profile_id', id).eq('competency_id', body.competency_id).maybeSingle();
+  if (oldErr) throw new HttpError(500, oldErr.message);
+  const oldRow = old || {};
+  const internRating = ctx.role === 'intern' ? (body.intern_rating ?? oldRow.intern_rating) : oldRow.intern_rating;
+  const supervisorRating = ctx.role === 'intern' ? oldRow.supervisor_rating : (body.supervisor_rating ?? oldRow.supervisor_rating);
+  const evidence = ctx.role === 'intern' ? (body.evidence ?? oldRow.evidence) : oldRow.evidence;
+  const comment = ctx.role === 'intern' ? oldRow.supervisor_comment : (body.supervisor_comment ?? oldRow.supervisor_comment);
   for (const rating of [internRating, supervisorRating]) if (rating != null && (!Number.isInteger(Number(rating)) || Number(rating) < 1 || Number(rating) > 5)) throw new HttpError(400, 'Ratings must be between 1 and 5');
-  const [row] = await sql`
-    INSERT INTO competency_progress(intern_profile_id, competency_id, intern_rating, supervisor_rating, evidence, supervisor_comment, updated_by_identity_user_id)
-    VALUES (${id}, ${body.competency_id}, ${internRating}, ${supervisorRating}, ${limited(evidence, 3000, 'Evidence')}, ${limited(comment, 3000, 'Supervisor comment')}, ${ctx.user.id})
-    ON CONFLICT(intern_profile_id, competency_id) DO UPDATE SET intern_rating = EXCLUDED.intern_rating,
-      supervisor_rating = EXCLUDED.supervisor_rating, evidence = EXCLUDED.evidence, supervisor_comment = EXCLUDED.supervisor_comment,
-      updated_by_identity_user_id = EXCLUDED.updated_by_identity_user_id, updated_at = NOW()
-    RETURNING *`;
+  const row = unwrap(await admin.from('competency_progress').upsert({
+    intern_profile_id: id,
+    competency_id: body.competency_id,
+    intern_rating: internRating,
+    supervisor_rating: supervisorRating,
+    evidence: limited(evidence, 3000, 'Evidence'),
+    supervisor_comment: limited(comment, 3000, 'Supervisor comment'),
+    updated_by_identity_user_id: ctx.user.id,
+    updated_at: new Date().toISOString()
+  }, { onConflict: 'intern_profile_id,competency_id' }).select().single());
   return row;
 }
 
 async function rangeRequirementHours(env, id, start, end) {
-  const sql = getSql(env);
-  const profile = await loadProfile(env, id);
-  const components = await sql`SELECT * FROM requirement_components WHERE requirement_profile_id = ${profile.requirement_profile_id} ORDER BY sort_order`;
-  const manual = await sql`SELECT component_code, SUM(hours)::float total FROM hours WHERE intern_profile_id = ${id} AND work_date >= ${start} AND work_date < ${end} GROUP BY component_code`;
-  const manualMap = Object.fromEntries(manual.map(x => [x.component_code, num(x.total)]));
-  const [encounterRow] = await sql`SELECT COALESCE(SUM(duration_minutes) FILTER(WHERE attended), 0)::float minutes FROM encounters WHERE intern_profile_id = ${id} AND encounter_date >= ${start} AND encounter_date < ${end}`;
-  const encounterHours = num(encounterRow.minutes) / 60;
-  return components.filter(c => c.target_hours != null).map(c => {
-    let value = num(manualMap[c.code]);
-    if (c.calculation_mode === 'individual_encounters') value = encounterHours;
-    if (c.calculation_mode === 'manual_plus_individual_encounters') value += encounterHours;
-    return { code: c.code, name: c.name, total: round(value, 1) };
-  }).filter(x => x.total > 0);
+  const admin = getAdmin(env);
+  return unwrap(await admin.rpc('range_requirement_hours', { p_intern_id: id, p_start: start, p_end: end }));
 }
 
 export async function reports(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
   const month = (url.searchParams.get('month') || body.month || `${new Date().toISOString().slice(0, 7)}-01`).slice(0, 7) + '-01';
   const end = monthEnd(month);
   if (method === 'GET') {
-    const [[reportRow], [stats], activity] = await Promise.all([
-      sql`SELECT * FROM monthly_reports WHERE intern_profile_id = ${id} AND month = ${month}`,
-      sql`SELECT COUNT(*)::int booked, COUNT(*) FILTER(WHERE attended)::int attended,
-        COUNT(*) FILTER(WHERE attended AND patient_gender = 'Female')::int female,
-        COUNT(*) FILTER(WHERE attended AND patient_gender = 'Male')::int male,
-        COUNT(*) FILTER(WHERE attended AND session_type = 'First')::int first_sessions,
-        COUNT(*) FILTER(WHERE attended AND session_type = 'Follow-up')::int follow_up_sessions,
-        COALESCE(SUM(duration_minutes) FILTER(WHERE attended), 0)::float counselling_minutes
-        FROM encounters WHERE intern_profile_id = ${id} AND encounter_date >= ${month} AND encounter_date < ${end}`,
+    const [reportRes, statsRes, activity] = await Promise.all([
+      admin.from('monthly_reports').select('*').eq('intern_profile_id', id).eq('month', month).maybeSingle(),
+      admin.rpc('report_encounter_stats', { p_intern_id: id, p_start: month, p_end: end }),
       rangeRequirementHours(env, id, month, end)
     ]);
-    return { report: reportRow || { status: 'Draft' }, hours: activity, stats };
+    if (reportRes.error) throw new HttpError(500, reportRes.error.message);
+    if (statsRes.error) throw new HttpError(500, statsRes.error.message);
+    return { report: reportRes.data || { status: 'Draft' }, hours: activity, stats: statsRes.data };
   }
   requireMethod(method, ['POST']);
   const status = ctx.role === 'intern' ? 'Submitted' : 'Reviewed';
   const internComment = limited(body.intern_comment, 5000, 'Intern comment');
   const supervisorComment = limited(body.supervisor_comment, 5000, 'Supervisor comment');
-  const [row] = await sql`
-    INSERT INTO monthly_reports(intern_profile_id, month, status, intern_comment, supervisor_comment, submitted_at, reviewed_at)
-    VALUES (${id}, ${month}, ${status}, ${internComment}, ${supervisorComment}, CASE WHEN ${status} = 'Submitted' THEN NOW() END, CASE WHEN ${status} = 'Reviewed' THEN NOW() END)
-    ON CONFLICT(intern_profile_id, month) DO UPDATE SET status = EXCLUDED.status,
-      intern_comment = COALESCE(EXCLUDED.intern_comment, monthly_reports.intern_comment),
-      supervisor_comment = COALESCE(EXCLUDED.supervisor_comment, monthly_reports.supervisor_comment),
-      submitted_at = CASE WHEN EXCLUDED.status = 'Submitted' THEN NOW() ELSE monthly_reports.submitted_at END,
-      reviewed_at = CASE WHEN EXCLUDED.status = 'Reviewed' THEN NOW() ELSE monthly_reports.reviewed_at END,
-      updated_at = NOW()
-    RETURNING *`;
+  const row = unwrap(await admin.rpc('upsert_monthly_report', {
+    p_intern_id: id,
+    p_month: month,
+    p_status: status,
+    p_intern_comment: internComment,
+    p_supervisor_comment: supervisorComment
+  }));
   return row;
 }
 
 export async function referrals(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const requestedId = Number(url.searchParams.get('intern_id') || body.intern_profile_id || 0);
   const id = ctx.role === 'intern' ? ctx.profile.id : requestedId;
   if (method === 'GET') {
     if (id) {
       await assertInternAccess(ctx, id, env);
-      return sql`
-        SELECT r.*, p.display_name intern_name FROM referrals r JOIN profiles p ON p.id = r.intern_profile_id
-        WHERE r.intern_profile_id = ${id} ORDER BY COALESCE(r.next_action_date, r.referral_date) DESC, r.created_at DESC`;
+      const rows = unwrap(await admin.from('referrals').select('*, profiles(display_name)').eq('intern_profile_id', id).order('created_at', { ascending: false }));
+      return sortReferrals(withInternName(rows));
     }
     requireRole(ctx, ['programme_lead', 'supervisor']);
-    if (ctx.role === 'supervisor') return sql`
-      SELECT r.*, p.display_name intern_name FROM referrals r JOIN profiles p ON p.id = r.intern_profile_id
-      WHERE p.supervisor_identity_user_id = ${ctx.user.id} ORDER BY COALESCE(r.next_action_date, r.referral_date) DESC, r.created_at DESC`;
-    return sql`
-      SELECT r.*, p.display_name intern_name FROM referrals r JOIN profiles p ON p.id = r.intern_profile_id
-      ORDER BY COALESCE(r.next_action_date, r.referral_date) DESC, r.created_at DESC`;
+    let q = admin.from('referrals')
+      .select(ctx.role === 'supervisor' ? '*, profiles!inner(display_name, supervisor_identity_user_id)' : '*, profiles(display_name)')
+      .order('created_at', { ascending: false });
+    if (ctx.role === 'supervisor') q = q.eq('profiles.supervisor_identity_user_id', ctx.user.id);
+    const rows = unwrap(await q);
+    return sortReferrals(withInternName(rows));
   }
   requireMethod(method, ['POST', 'PATCH']);
   if (method === 'POST') {
@@ -568,14 +621,26 @@ export async function referrals(ctx, env, url, body, method) {
     const priority = body.priority || 'Routine';
     if (!REFERRAL_STATUSES.has(status) || !REFERRAL_PRIORITIES.has(priority)) throw new HttpError(400, 'Invalid referral status or priority');
     const attempts = Math.max(0, Math.min(100, Number(body.contact_attempts || 0)));
-    const [row] = await sql`
-      INSERT INTO referrals(intern_profile_id, referral_code, referral_date, referral_source, site, presenting_category, priority, status, contact_attempts, next_action_date, last_update, created_by_identity_user_id, updated_by_identity_user_id)
-      VALUES (${id}, ${limited(body.referral_code, 50, 'Referral code', true)?.toUpperCase()}, ${dateValue(body.referral_date, 'Referral date')}, ${limited(body.referral_source, 100, 'Referral source')}, ${limited(body.site, 120, 'Site')}, ${limited(body.presenting_category, 120, 'Presenting category')}, ${priority}, ${status}, ${attempts}, ${body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null}, ${limited(body.last_update, 1000, 'Operational update')}, ${ctx.user.id}, ${ctx.user.id})
-      RETURNING *`;
+    const row = unwrap(await admin.from('referrals').insert({
+      intern_profile_id: id,
+      referral_code: limited(body.referral_code, 50, 'Referral code', true)?.toUpperCase(),
+      referral_date: dateValue(body.referral_date, 'Referral date'),
+      referral_source: limited(body.referral_source, 100, 'Referral source'),
+      site: limited(body.site, 120, 'Site'),
+      presenting_category: limited(body.presenting_category, 120, 'Presenting category'),
+      priority,
+      status,
+      contact_attempts: attempts,
+      next_action_date: body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null,
+      last_update: limited(body.last_update, 1000, 'Operational update'),
+      created_by_identity_user_id: ctx.user.id,
+      updated_by_identity_user_id: ctx.user.id
+    }).select().single());
     await audit(ctx, env, 'create', 'referral', row.id, { status }, id);
     return row;
   }
-  const [current] = await sql`SELECT * FROM referrals WHERE id = ${Number(body.id)}`;
+  const { data: current, error: curErr } = await admin.from('referrals').select('*').eq('id', Number(body.id)).maybeSingle();
+  if (curErr) throw new HttpError(500, curErr.message);
   if (!current) throw new HttpError(404, 'Referral not found');
   await assertInternAccess(ctx, current.intern_profile_id, env);
   const status = body.status || current.status;
@@ -585,39 +650,50 @@ export async function referrals(ctx, env, url, body, method) {
   if (!Number.isInteger(attempts) || attempts < 0 || attempts > 100) throw new HttpError(400, 'Invalid contact attempts');
   const nextActionDate = body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null;
   const lastUpdate = limited(body.last_update, 1000, 'Operational update');
-  const [row] = await sql`
-    UPDATE referrals SET priority = ${priority}, status = ${status}, contact_attempts = ${attempts}, next_action_date = ${nextActionDate},
-      last_update = ${lastUpdate}, updated_by_identity_user_id = ${ctx.user.id}, updated_at = NOW(),
-      closed_at = CASE WHEN ${status} LIKE 'Closed%' THEN COALESCE(closed_at, NOW()) ELSE NULL END
-    WHERE id = ${current.id} RETURNING *`;
+  const row = unwrap(await admin.rpc('update_referral', {
+    p_referral_id: current.id,
+    p_priority: priority,
+    p_status: status,
+    p_contact_attempts: attempts,
+    p_next_action_date: nextActionDate,
+    p_last_update: lastUpdate,
+    p_updated_by: ctx.user.id
+  }));
   await audit(ctx, env, 'update', 'referral', row.id, { status }, current.intern_profile_id);
   return row;
 }
 
 export async function pilotContext(ctx, env, url) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : 0));
   await assertInternAccess(ctx, id, env);
-  const [schedule, planned] = await Promise.all([
-    sql`SELECT * FROM weekly_schedule_items WHERE intern_profile_id = ${id} AND active = true ORDER BY weekday, start_time NULLS LAST`,
-    sql`SELECT * FROM planned_activities WHERE intern_profile_id = ${id} AND status <> 'Cancelled' ORDER BY activity_date NULLS LAST, id`
+  const [scheduleRes, plannedRes] = await Promise.all([
+    admin.from('weekly_schedule_items').select('*').eq('intern_profile_id', id).eq('active', true)
+      .order('weekday', { ascending: true }).order('start_time', { ascending: true, nullsFirst: false }),
+    admin.from('planned_activities').select('*').eq('intern_profile_id', id).neq('status', 'Cancelled')
+      .order('activity_date', { ascending: true, nullsFirst: false }).order('id', { ascending: true })
   ]);
-  return { schedule, planned };
+  if (scheduleRes.error) throw new HttpError(500, scheduleRes.error.message);
+  if (plannedRes.error) throw new HttpError(500, plannedRes.error.message);
+  return { schedule: scheduleRes.data, planned: plannedRes.data };
 }
 
 export async function feedback(ctx, env, url, body, method) {
-  const sql = getSql(env);
+  const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
-  if (method === 'GET') return sql`SELECT * FROM pilot_feedback WHERE intern_profile_id = ${id} ORDER BY created_at DESC LIMIT 200`;
+  if (method === 'GET') return unwrap(await admin.from('pilot_feedback').select('*').eq('intern_profile_id', id).order('created_at', { ascending: false }).limit(200));
   if (method === 'POST') {
     const message = String(body.message || '').trim();
     if (!message) throw new HttpError(400, 'Feedback is required');
     const rating = body.rating ? Math.max(1, Math.min(5, Number(body.rating))) : null;
-    const [row] = await sql`
-      INSERT INTO pilot_feedback(intern_profile_id, feedback_type, rating, message, context_view)
-      VALUES (${id}, ${body.feedback_type || 'General'}, ${rating}, ${message}, ${body.context_view || null})
-      RETURNING *`;
+    const row = unwrap(await admin.from('pilot_feedback').insert({
+      intern_profile_id: id,
+      feedback_type: body.feedback_type || 'General',
+      rating,
+      message,
+      context_view: body.context_view || null
+    }).select().single());
     await audit(ctx, env, 'create', 'pilot_feedback', row.id, { type: row.feedback_type }, id);
     return row;
   }
@@ -626,35 +702,28 @@ export async function feedback(ctx, env, url, body, method) {
 
 export async function programme(ctx, env) {
   requireRole(ctx, ['programme_lead', 'management']);
-  const sql = getSql(env);
-  const [internRows, [caseRow], [supervisionRow], [reportsRow], sitesRows, [encounterRow], [waitRow]] = await Promise.all([
-    sql`SELECT id, institution FROM profiles WHERE role = 'intern' AND active = true`,
-    sql`SELECT COUNT(*)::int total, COUNT(*) FILTER(WHERE status <> 'Exited')::int active FROM cases`,
-    sql`SELECT COUNT(*)::int n FROM supervision_items WHERE status = 'Open'`,
-    sql`SELECT COUNT(*) FILTER(WHERE status = 'Reviewed')::int reviewed FROM monthly_reports WHERE month = date_trunc('month', CURRENT_DATE)::date`,
-    sql`SELECT site, COUNT(*)::int cases FROM cases GROUP BY site ORDER BY cases DESC`,
-    sql`SELECT COUNT(*)::int booked, COUNT(*) FILTER(WHERE attended)::int attended FROM encounters`,
-    sql`SELECT percentile_cont(0.5) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM (intake_at - allocated_at)) / 86400.0)::float med FROM cases WHERE intake_at IS NOT NULL`
-  ]);
-  const progress = await Promise.all(internRows.map(x => requirementProgress(env, x.id)));
+  const admin = getAdmin(env);
+  const metrics = unwrap(await admin.rpc('programme_metrics'));
+  const internIds = metrics.intern_ids || [];
+  const progress = await Promise.all(internIds.map(iid => requirementProgress(env, iid)));
   const totalHours = progress.reduce((s, x) => s + num(x.summary.total_completed), 0);
   const atRisk = progress.filter(x => x.summary.at_risk_components > 0).length;
-  const booked = num(encounterRow.booked), attended = num(encounterRow.attended);
-  const institutions = Object.entries(internRows.reduce((a, x) => { a[x.institution || 'Other'] = (a[x.institution || 'Other'] || 0) + 1; return a; }, {})).map(([institution, count]) => ({ institution, count }));
+  const booked = num(metrics.encounters?.booked);
+  const attended = num(metrics.encounters?.attended);
   return {
     metrics: {
-      interns: internRows.length,
-      cases: caseRow.total,
-      active_cases: caseRow.active,
+      interns: internIds.length,
+      cases: metrics.cases?.total ?? 0,
+      active_cases: metrics.cases?.active ?? 0,
       hours: round(totalHours, 1),
       at_risk_interns: atRisk,
-      open_supervision: supervisionRow.n,
-      reviewed_reports: reportsRow.reviewed,
+      open_supervision: metrics.open_supervision ?? 0,
+      reviewed_reports: metrics.reviewed_reports ?? 0,
       booked, attended,
       attendance_rate: booked ? Math.round(attended / booked * 100) : null,
-      median_days_to_intake: waitRow.med
+      median_days_to_intake: metrics.median_days_to_intake ?? null
     },
-    sites: sitesRows,
-    institutions
+    sites: metrics.sites || [],
+    institutions: metrics.institutions || []
   };
 }
