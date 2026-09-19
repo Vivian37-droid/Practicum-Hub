@@ -719,6 +719,7 @@ export async function referrals(ctx, env, url, body, method) {
       contact_attempts: attempts,
       next_action_date: body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null,
       last_update: limited(body.last_update, 1000, 'Operational update'),
+      update_category: limited(body.update_category, 60, 'Operational update category'),
       created_by_identity_user_id: ctx.user.id,
       updated_by_identity_user_id: ctx.user.id
     }).select().single());
@@ -736,6 +737,7 @@ export async function referrals(ctx, env, url, body, method) {
   if (!Number.isInteger(attempts) || attempts < 0 || attempts > 100) throw new HttpError(400, 'Invalid contact attempts');
   const nextActionDate = body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null;
   const lastUpdate = limited(body.last_update, 1000, 'Operational update');
+  const updateCategory = body.update_category == null ? current.update_category : limited(body.update_category, 60, 'Operational update category');
   const row = unwrap(await admin.rpc('update_referral', {
     p_referral_id: current.id,
     p_priority: priority,
@@ -743,7 +745,8 @@ export async function referrals(ctx, env, url, body, method) {
     p_contact_attempts: attempts,
     p_next_action_date: nextActionDate,
     p_last_update: lastUpdate,
-    p_updated_by: ctx.user.id
+    p_updated_by: ctx.user.id,
+    p_update_category: updateCategory
   }));
   await audit(ctx, env, 'update', 'referral', row.id, { status }, current.intern_profile_id);
   return row;
