@@ -119,23 +119,54 @@ function needIntern(prefix = '') {
   $('#content').innerHTML = prefix + '<div class="notice info">Select an intern first from the Interns screen.</div>';
   return false;
 }
-// Persistent intern switcher: lets programme_lead/supervisor jump between
-// interns from any of the per-intern views, instead of only via a row click
-// on the Dashboard/Interns tables (which was the only way S.intern got set).
-async function internSwitcherHtml() {
+// Single source of truth for "which intern is programme_lead/supervisor
+// currently looking at", so every screen that sets or reads it stays in
+// sync and the choice survives a page refresh (sessionStorage, scoped to
+// the signed-in profile so switching accounts can't leak a stale pick).
+function internStorageKey() { return `hub_intern_${S.session?.profile?.id ?? 'anon'}`; }
+function setActiveIntern(x) {
+  S.intern = x || null;
+  try { x ? sessionStorage.setItem(internStorageKey(), JSON.stringify(x)) : sessionStorage.removeItem(internStorageKey()); } catch {}
+}
+function clearActiveIntern() { setActiveIntern(null); }
+function restoreActiveIntern() {
+  if (!['programme_lead', 'supervisor'].includes(S.session?.role)) return;
+  try { const raw = sessionStorage.getItem(internStorageKey()); if (raw) S.intern = JSON.parse(raw); } catch {}
+}
+function internAttention(x) {
+  const s = x?.requirement_summary || {};
+  return s.at_risk_components ? 'Target at risk' : s.watch_components ? 'Watch' : 'On track';
+}
+// Persistent intern context bar: lets programme_lead/supervisor jump between
+// interns from any of the per-intern views (instead of only via a row click
+// on the Dashboard/Interns tables), and doubles as the "who am I looking at"
+// identity strip. `allowAll` screens (cross-intern feeds) leave the choice
+// on "All interns" until the user explicitly picks one; screens that need a
+// specific intern auto-select the first one so the selector shown and the
+// data loaded can never disagree (previously the browser could default the
+// <select> to the first option while S.intern stayed unset, showing an
+// intern in the dropdown while the page still said "Select an intern first").
+async function internSwitcherHtml(opts = {}) {
   if (!['programme_lead', 'supervisor'].includes(S.session.role)) return '';
   const list = await api('interns');
   S._internList = list;
+  if (!opts.allowAll && !activeId() && list.length) setActiveIntern(list[0]);
   const activeIdVal = activeId();
-  const opts = list.map(x => `<option value="${x.id}" ${x.id == activeIdVal ? 'selected' : ''}>${esc(x.display_name)}</option>`).join('');
-  return `<div class="card" style="margin-bottom:14px"><label style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><b>Viewing intern:</b><select id="internSwitch" style="flex:1;min-width:180px">${list.length ? opts : '<option value="">No interns yet</option>'}</select></label></div>`;
+  const current = list.find(x => x.id == activeIdVal) || null;
+  const allOpt = opts.allowAll ? `<option value="" ${!activeIdVal ? 'selected' : ''}>All interns</option>` : '';
+  const opts_ = allOpt + list.map(x => `<option value="${x.id}" ${x.id == activeIdVal ? 'selected' : ''}>${esc(x.display_name)}</option>`).join('');
+  const identity = current
+    ? `<div class="grow"><b>${esc(current.display_name)}</b><br><small class="muted">${esc(current.institution || 'Institution not set')} · ${tag(internAttention(current))}</small></div>`
+    : `<div class="grow"><b>All interns</b><br><small class="muted">No single intern selected</small></div>`;
+  return `<div class="card intern-context" style="margin-bottom:14px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${identity}<label style="display:flex;align-items:center;gap:8px"><span class="muted" style="font-size:12px">Viewing</span><select id="internSwitch" style="min-width:180px">${list.length ? opts_ : '<option value="">No interns yet</option>'}</select></label></div></div>`;
 }
 function bindInternSwitcher() {
   const sel = $('#internSwitch');
   if (!sel) return;
   sel.onchange = () => {
+    if (!sel.value) { clearActiveIntern(); go(S.view); return; }
     const found = (S._internList || []).find(i => i.id == sel.value);
-    if (found) { S.intern = found; go(S.view); }
+    if (found) { setActiveIntern(found); go(S.view); }
   };
 }
 function bindGo() { $$('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go)); }
@@ -207,7 +238,7 @@ async function dashboard() {
   $('#content').innerHTML = `<div class="hero"><h1>Supervise the programme before problems become end-of-placement crises.</h1><p>The dashboard now separates institutional requirements, calculates weekly pace, and flags when the current clinical allocation may be insufficient.</p><div class="actions"><button class="btn" data-go="interns">Manage interns</button><button class="btn" data-go="assistant">Open Practicum Assistant</button></div></div>
     <div class="grid metrics">${metric('Active interns', m.interns)}${metric('Interns with target risk', m.at_risk)}${metric('Active cases', m.active_cases)}${metric('Open supervision', m.open_supervision)}</div>
     <div class="section"><div><h3>Placement pace</h3><p>Click an intern to open their requirement profile.</p></div></div>${table(['Intern', 'Formal hours', 'Weeks left', 'Clinical pace needed', 'Cases', 'Requirements', 'Supervision'], rows)}`;
-  $$('[data-id]').forEach(row => row.onclick = () => { S.intern = d.interns.find(i => i.id == row.dataset.id); go('progress'); });
+  $$('[data-id]').forEach(row => row.onclick = () => { setActiveIntern(d.interns.find(i => i.id == row.dataset.id)); go('progress'); });
   bindGo();
 }
 
@@ -222,14 +253,14 @@ async function interns() {
   $('#content').innerHTML = `<div class="section"><div><h3>Intern placements</h3><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
     ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account', ...(isAdmin ? ['Admin'] : [])], rows)}
     <div class="notice info" style="margin-top:12px"><b>Account setup:</b> Adding a new intern automatically sends them a Supabase sign-in invitation by email. SACAP and Cornerstone use different formal hour categories, and the Hub loads the selected profile automatically.</div>`;
-  $$('[data-id]').forEach(x => x.onclick = () => { S.intern = data.find(i => i.id == x.dataset.id); go('progress'); });
+  $$('[data-id]').forEach(x => x.onclick = () => { setActiveIntern(data.find(i => i.id == x.dataset.id)); go('progress'); });
   $('#addIntern')?.addEventListener('click', () => { modal('Add intern', `<form id="fIntern" class="formgrid"><div class="field"><label>Name<input name="display_name" required></label></div><div class="field"><label>Email<input name="email" type="email" required></label></div><div class="field"><label>Institution<select name="institution"><option>SACAP</option><option>Cornerstone Institute</option><option>Other</option></select></label></div><div class="field"><label>Default counselling session length (min)<input name="default_session_minutes" type="number" min="15" max="240" value="60"></label></div><div class="field"><label>Placement start<input name="placement_start" type="date"></label></div><div class="field"><label>Placement end<input name="placement_end" type="date"></label></div><div class="full"><button class="btn primary">Create placement</button></div></form>`); });
   $$('[data-del-intern]').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
     adminDelete('interns', b.dataset.delIntern, `intern placement for ${b.dataset.delName} (and all of their cases, hours, supervision and history)`, () => go('interns'));
   }));
 }
-async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { S.intern = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast(S.intern.invite?.sent ? 'Placement created · invite email sent' : S.intern.invite && !S.intern.invite.sent ? `Placement created, but the invite email failed: ${S.intern.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
+async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { const created = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); setActiveIntern(created); closeModal(); toast(created.invite?.sent ? 'Placement created · invite email sent' : created.invite && !created.invite.sent ? `Placement created, but the invite email failed: ${created.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
 
 const REFERRAL_STATUSES = ['Allocated','Contact attempted','Contact made','Booked','Intake completed','Active','Awaiting feedback','Closed – completed','Closed – no contact','Reallocated'];
 const SITES = ['Stellenbosch Hospital','Stellenbosch Hospital OPD','Cloetesville CDC','Groendal Clinic','Khayamandi Clinic','Klapmuts Clinic','Idas Valley Clinic','Don & Pat Clinic','Jamestown Clinic','Night Shelter','SACAP campus','Cornerstone campus'];
@@ -313,7 +344,7 @@ async function saveOpeningBalance(e) {
 }
 
 async function cases() {
-  const switcherHtml = await internSwitcherHtml();
+  const switcherHtml = await internSwitcherHtml({ allowAll: true });
   const id = activeId(), query = id ? `cases?intern_id=${id}` : 'cases', data = await api(query);
   const canPlan = ['programme_lead', 'supervisor'].includes(S.session.role);
   const isAdmin = S.session.role === 'programme_lead';
@@ -342,7 +373,7 @@ async function supervisionAllView(switcherHtml) {
   bindInternSwitcher();
 }
 async function supervision() {
-  const switcherHtml = await internSwitcherHtml();
+  const switcherHtml = await internSwitcherHtml({ allowAll: true });
   if (!activeId()) {
     if (['programme_lead', 'supervisor'].includes(S.session.role)) return supervisionAllView(switcherHtml);
     if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
@@ -377,7 +408,7 @@ async function hoursAllView(switcherHtml) {
   bindInternSwitcher();
 }
 async function hours() {
-  const switcherHtml = await internSwitcherHtml();
+  const switcherHtml = await internSwitcherHtml({ allowAll: true });
   if (!activeId() && ['programme_lead', 'supervisor'].includes(S.session.role)) return hoursAllView(switcherHtml);
   if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), [data, req] = await Promise.all([api(`hours?intern_id=${id}`), api(`requirements?intern_id=${id}`)]);
@@ -393,25 +424,46 @@ async function hours() {
 async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
 
 async function reports() {
-  if (!needIntern()) return;
-  const id = activeId(), data = await api(`reports?intern_id=${id}&month=${month()}-01`), s = data.stats || {}, isIntern = S.session.role === 'intern';
-  $('#content').innerHTML = `<div class="section"><div><h3>${isIntern ? 'My monthly report' : 'Monthly report'}</h3><p>${month()} · statistics generated from routine activity.</p></div><span class="tag">${esc(data.report.status)}</span></div>
+  const switcherHtml = await internSwitcherHtml();
+  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
+  const id = activeId(), isIntern = S.session.role === 'intern';
+  const institution = isIntern ? S.session.profile.institution : S.intern?.institution;
+  const internName = isIntern ? S.session.profile.display_name : S.intern?.display_name;
+  const data = await api(`reports?intern_id=${id}&month=${month()}-01`), s = data.stats || {};
+  const refreshedAt = new Date().toLocaleString();
+  const reviewLine = data.report.status === 'Reviewed'
+    ? `Reviewed by ${esc(data.report.reviewed_by_name || 'unknown reviewer')}${data.report.reviewed_at ? ' on ' + esc(new Date(data.report.reviewed_at).toLocaleString()) : ''}`
+    : data.report.status === 'Submitted' ? `Submitted${data.report.submitted_at ? ' on ' + esc(new Date(data.report.submitted_at).toLocaleString()) : ''} · awaiting review`
+    : 'Not yet submitted';
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'My monthly report' : 'Monthly report'} · ${esc(internName || '')}</h3><p>${esc(institution || 'Institution not set')} · ${month()}</p></div><span class="tag">${esc(data.report.status)}</span></div>
+    <div class="notice info" style="margin-top:-4px;margin-bottom:14px">${reviewLine} · data refreshed ${esc(refreshedAt)}</div>
     <div class="grid metrics">${metric('Booked', s.booked || 0)}${metric('Attended', s.attended || 0)}${metric('Female', s.female || 0)}${metric('Male', s.male || 0)}</div>
     <div class="grid metrics" style="margin-top:14px">${metric('Intake', s.intake_sessions || 0)}${metric('Follow-ups', s.follow_up_sessions || 0)}${metric('Terminations', s.termination_sessions || 0)}${metric('Counselling time', fmt((s.counselling_minutes || 0) / 60) + ' h')}</div>
     <div class="section"><h3>Formal requirement hours this month</h3></div><div class="card list">${data.hours.map(x => `<div class="row"><div class="grow">${esc(x.name)}</div><b>${fmt(x.total)} h</b></div>`).join('') || 'No hours recorded.'}</div>
     <div class="section"><h3>${isIntern ? 'Submission' : 'Supervisor review'}</h3></div><div class="card field"><label>${isIntern ? 'Reflection / notable activity' : 'Supervisor comment'}<textarea id="comment">${esc(isIntern ? data.report.intern_comment || '' : data.report.supervisor_comment || '')}</textarea></label><button id="sendReport" class="btn primary">${isIntern ? 'Submit report' : 'Mark reviewed'}</button></div>`;
-  $('#sendReport').onclick = async () => { const body = { intern_profile_id: id, month: month() + '-01' }; body[isIntern ? 'intern_comment' : 'supervisor_comment'] = $('#comment').value; await api('reports', { method: 'POST', body: JSON.stringify(body) }); toast(isIntern ? 'Submitted' : 'Reviewed'); go('reports'); };
+  bindInternSwitcher();
+  $('#sendReport').onclick = async () => {
+    if (!activeId()) { toast('No intern selected — cannot submit or review this report.'); return; }
+    const btn = $('#sendReport'); if (btn.disabled) return; btn.disabled = true; const original = btn.textContent; btn.textContent = 'Saving…';
+    try {
+      const body = { intern_profile_id: id, month: month() + '-01' }; body[isIntern ? 'intern_comment' : 'supervisor_comment'] = $('#comment').value;
+      await api('reports', { method: 'POST', body: JSON.stringify(body) });
+      toast(isIntern ? 'Submitted' : 'Reviewed'); go('reports');
+    } catch (x) { toast(x.message); btn.disabled = false; btn.textContent = original; }
+  };
 }
 
 
 async function feedbackView(){
-  if(!needIntern()) return;
+  const switcherHtml = S.session.role==='intern' ? '' : await internSwitcherHtml();
+  if(!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id=activeId();
   const data=await api(`feedback?intern_id=${id}`);
   const isIntern=S.session.role==='intern', isAdmin=S.session.role==='programme_lead';
-  $('#content').innerHTML=`<div class="hero"><small>Live pilot</small><h1>${isIntern?'Help shape the Practicum Hub.':'Pilot feedback'}</h1><p>${isIntern?'Tell us what is useful, what gets in your way, and what you expected to find but could not.':'Review what the intern is experiencing so the system improves during the pilot.'}</p></div>
+  $('#content').innerHTML=switcherHtml+`<div class="hero"><small>Live pilot</small><h1>${isIntern?'Help shape the Practicum Hub.':'Pilot feedback'}</h1><p>${isIntern?'Tell us what is useful, what gets in your way, and what you expected to find but could not.':'Review what the intern is experiencing so the system improves during the pilot.'}</p></div>
     ${isIntern?`<div class="card" style="margin-top:14px"><form id="fFeedback" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Type<select name="feedback_type"><option>What worked</option><option>What was frustrating</option><option>I could not find something</option><option>Suggestion</option><option>General</option></select></label></div><div class="field"><label>How useful was the Hub today? (1–5)<input name="rating" type="number" min="1" max="5"></label></div><div class="full field"><label>Feedback<textarea name="message" required placeholder="Be specific — what were you trying to do?"></textarea></label></div><div class="full"><button class="btn primary">Send feedback</button></div></form></div>`:''}
     <div class="section"><div><h3>Feedback history</h3><p>Used during the Erin pilot to drive weekly iteration.</p></div></div><div class="card list">${data.map(x=>`<div class="row"><div class="grow"><b>${esc(x.feedback_type)}</b> ${x.rating?`<span class="tag">${x.rating}/5</span>`:''}<br><span>${esc(x.message)}</span><br><small class="muted">${esc(String(x.created_at||'').slice(0,10))}${x.context_view?' · '+esc(x.context_view):''}</small></div>${tag(x.status||'New')}${isAdmin?`<button class="btn small danger-btn" data-del-feedback="${x.id}">Delete</button>`:''}</div>`).join('')||'No feedback yet.'}</div>`;
+  bindInternSwitcher();
   $$('[data-del-feedback]').forEach(b=>b.onclick=()=>adminDelete('feedback', b.dataset.delFeedback, 'feedback entry', () => go('feedback')));
 }
 
@@ -549,11 +601,11 @@ async function demoApi(path, options = {}) {
   throw Error('Preview route not implemented');
 }
 function demoProgramme(d){const atRiskInterns=demoRequirement(11).summary.at_risk_components>0?1:0;return{metrics:{interns:1,cases:0,active_cases:0,hours:470.5,at_risk_interns:atRiskInterns,open_supervision:0,reviewed_reports:0,booked:0,attended:0,attendance_rate:null,median_days_to_intake:null},sites:[],institutions:[{institution:'SACAP',count:1}]};}
-async function preview(role){S.preview=true;S.data=demo();const profile=role==='intern'?{id:11,display_name:'Erin George'}:{id:1,display_name:role==='management'?'Programme Viewer':'Vivian Leibrandt'};S.session={profile,role};shell();const requested=new URLSearchParams(location.search).get('view');if(requested&&titles[requested])setTimeout(()=>go(requested),0);}
+async function preview(role){S.preview=true;S.data=demo();const profile=role==='intern'?{id:11,display_name:'Erin George'}:{id:1,display_name:role==='management'?'Programme Viewer':'Vivian Leibrandt'};S.session={profile,role};restoreActiveIntern();shell();const requested=new URLSearchParams(location.search).get('view');if(requested&&titles[requested])setTimeout(()=>go(requested),0);}
 let pendingAuthType=null;
 function authError(message){$('#authErr').classList.remove('hidden');$('#authErr').textContent=message;}
 function showPasswordSetup(type){pendingAuthType=type;$('#login').classList.add('hidden');$('#setPassword').classList.remove('hidden');$('#setPasswordMessage').innerHTML=type==='recovery'?'<b>Choose a new password</b><br>Enter and confirm your new password.':'<b>Finish setting up your account</b><br>Create a password to accept your invitation.';}
-async function finishLogin(){const b=await api('bootstrap');S.session={profile:b.profile,role:b.role};shell();}
+async function finishLogin(){const b=await api('bootstrap');S.session={profile:b.profile,role:b.role};restoreActiveIntern();shell();}
 
 // Auth: Supabase Auth (supabase-js) replaces @netlify/identity. Invite and
 // password-recovery links both land back on this page with tokens in the
