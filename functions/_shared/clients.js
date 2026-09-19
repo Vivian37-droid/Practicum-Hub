@@ -26,7 +26,8 @@ export function getSql(env) {
       ssl: env.SUPABASE_DB_SSL === 'false' ? false : 'require',
       max: 3,
       idle_timeout: 20,
-      connect_timeout: 10
+      connect_timeout: 10,
+      prepare: false
     });
   }
   return globalThis.__phSql;
