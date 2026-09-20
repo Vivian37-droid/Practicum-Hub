@@ -33,3 +33,9 @@ header{height:74px;backdrop-filter:blur(14px);background:#f8fbf9e8;padding:0 28p
 .queue-item .queue-text span{display:block;color:var(--muted);font-size:12px;margin-top:2px}
 .queue-empty{color:var(--muted);font-size:13px}
 @media(max-width:900px){.navgroup h4{color:#ffffff80}}
+/* Prompt 4: destructive-action protections — undo toast, correction/reason fields */
+#toast{display:flex;align-items:center;gap:10px}
+.toast-undo{background:#ffffff22;color:#fff;border:1px solid #ffffff55;border-radius:7px;padding:5px 10px;font-weight:800;font-size:12px}
+.toast-undo:hover{background:#ffffff38}
+#confirmReason{min-height:60px}
+button:disabled{opacity:.6;cursor:not-allowed}

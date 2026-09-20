@@ -5,7 +5,7 @@ const fmt = n => Number(n || 0).toLocaleString(undefined, { maximumFractionDigit
 const pc = (a, b) => b ? Math.min(100, Math.round(Number(a || 0) / Number(b) * 100)) : 0;
 const today = () => new Date().toISOString().slice(0, 10);
 const month = () => new Date().toISOString().slice(0, 7);
-const statusClass = s => { const v=String(s||'').toLowerCase(); if(['complete','on track','reviewed','closed'].includes(v)||v.startsWith('closed')) return 'green'; if(v.includes('risk')||v==='required'||v==='target at risk'||v==='action needed'||v==='urgent') return 'red'; if(['watch','monitor','dates needed','due','important','priority','awaiting feedback'].includes(v)) return 'amber'; return ''; };
+const statusClass = s => { const v=String(s||'').toLowerCase(); if(['complete','on track','reviewed','closed'].includes(v)||v.startsWith('closed')) return 'green'; if(v.includes('risk')||v==='required'||v==='target at risk'||v==='action needed'||v==='urgent') return 'red'; if(['watch','monitor','dates needed','due','important','priority','awaiting feedback','deactivated'].includes(v)) return 'amber'; return ''; };
 const responsibilityLabel = r => ({ site: 'Placement site', shared: 'Shared', campus: 'Campus / institution', 'information-only': 'Information only' }[r] || r || '—');
 
 // Single persistent form-submit dispatcher. Modals used to register a fresh
@@ -17,9 +17,23 @@ const responsibilityLabel = r => ({ site: 'Placement site', shared: 'Shared', ca
 // removes that failure mode entirely.
 const FORM_HANDLERS = {};
 function registerForm(id, handler) { FORM_HANDLERS[id] = handler; }
+// Prompt 4: "protection against accidental double submission" + "disabled
+// and loading states during requests" — applied once, centrally, to every
+// registered form instead of each save* function managing its own button
+// state. Buttons are re-enabled in `finally` so this works whether the
+// handler closes the modal on success (buttons are simply discarded) or
+// leaves it open to show an error (buttons come back usable).
 document.addEventListener('submit', (e) => {
   const fn = FORM_HANDLERS[e.target && e.target.id];
-  if (fn) { e.preventDefault(); fn(e); }
+  if (!fn) return;
+  e.preventDefault();
+  const form = e.target;
+  const buttons = $$('button', form);
+  if (buttons.some(b => b.disabled)) return;
+  buttons.forEach(b => { b.dataset.origText = b.textContent; b.disabled = true; });
+  const submitBtn = buttons[buttons.length - 1];
+  if (submitBtn) submitBtn.textContent = 'Saving…';
+  Promise.resolve(fn(e)).finally(() => buttons.forEach(b => { b.disabled = false; if (b.dataset.origText != null) b.textContent = b.dataset.origText; }));
 });
 registerForm('fIntern', e => saveIntern(e));
 registerForm('fReferral', e => saveReferral(e));
@@ -30,6 +44,7 @@ registerForm('fSup', e => saveSup(e));
 registerForm('fSupReview', e => saveSupReview(e));
 registerForm('fComp', e => saveComp(e));
 registerForm('fHours', e => saveHours(e));
+registerForm('fHoursEdit', e => saveHoursCorrection(e));
 registerForm('fSchedule', e => saveSchedule(e));
 registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData(e.target)); b.context_view = S.view; try { await api('feedback', { method: 'POST', body: JSON.stringify(b) }); toast('Feedback saved'); go('feedback'); } catch (x) { toast(x.message); } });
 
@@ -58,7 +73,19 @@ const NAV_GROUPS = [
 function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
 const titles = { dashboard: 'Dashboard', interns: 'Interns', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
 
-function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 2200); }
+let toastTimer = null;
+// Prompt 4: "an undo or soft-delete approach where practical" — for
+// referral/supervision/pilot_feedback deletes (the entities restoreAudit()
+// can actually re-insert verbatim), the success toast carries an Undo
+// button that calls it, instead of the delete being the final word.
+function toast(text, action = null) {
+  clearTimeout(toastTimer);
+  const el = $('#toast');
+  el.innerHTML = action ? `<span>${esc(text)}</span> <button type="button" class="toast-undo">${esc(action.label)}</button>` : esc(text);
+  if (action) $('.toast-undo', el).onclick = () => { clearTimeout(toastTimer); el.classList.remove('show'); action.onClick(); };
+  el.classList.add('show');
+  toastTimer = setTimeout(() => el.classList.remove('show'), action ? 8000 : 2200);
+}
 function modal(title, html) { $('#modalTitle').textContent = title; $('#modalBody').innerHTML = html; $('#modal').classList.add('open'); }
 function closeModal() { $('#modal').classList.remove('open'); }
 // Programme-lead-only admin delete. The server independently enforces
@@ -66,16 +93,43 @@ function closeModal() { $('#modal').classList.remove('open'); }
 // PROGRAMME_LEAD_EMAILS, not anything the client sends), so this confirm
 // step is purely UX — interns/supervisors never even see these buttons,
 // and could not use them if they did.
-function confirmModal(title, message, onConfirm) {
-  modal(title, `<p>${message}</p><div class="full" style="display:flex;gap:10px;margin-top:14px"><button id="confirmYes" class="btn danger-btn">Delete</button><button id="confirmNo" class="btn">Cancel</button></div>`);
-  $('#confirmYes').onclick = async () => { $('#confirmYes').disabled = true; await onConfirm(); };
+//
+// Prompt 4: every confirmation now names the specific record (passed in via
+// `message`, built by the caller from data already on screen — no extra
+// fetch) rather than a generic "this referral"/"this case", and can capture
+// an operator-supplied reason for the audit trail. `onConfirm` receives that
+// reason (or undefined if no reason field was requested).
+function confirmModal(title, message, onConfirm, opts = {}) {
+  const reasonHtml = opts.reason ? `<div class="field" style="margin-top:10px"><label>${esc(opts.reason.label || 'Reason')}${opts.reason.required ? '' : ' (optional)'}<textarea id="confirmReason" rows="2" maxlength="500"></textarea></label></div>` : '';
+  modal(title, `<p>${message}</p>${reasonHtml}<div class="full" style="display:flex;gap:10px;margin-top:14px"><button id="confirmYes" class="btn ${opts.danger === false ? 'primary' : 'danger-btn'}">${esc(opts.confirmLabel || 'Delete')}</button><button id="confirmNo" class="btn">Cancel</button></div>`);
+  $('#confirmYes').onclick = async () => {
+    const reason = opts.reason ? $('#confirmReason').value.trim() : undefined;
+    if (opts.reason?.required && !reason) { $('#confirmReason').focus(); toast(`${opts.reason.label || 'A reason'} is required.`); return; }
+    $('#confirmYes').disabled = true; $('#confirmNo').disabled = true; $('#confirmYes').textContent = 'Working…';
+    await onConfirm(reason);
+  };
   $('#confirmNo').onclick = closeModal;
 }
-function adminDelete(path, id, label, after) {
-  confirmModal(`Delete this ${label}?`, `This permanently deletes this ${esc(label)} and cannot be undone.`, async () => {
-    try { await api(`${path}?id=${id}`, { method: 'DELETE' }); closeModal(); toast(label.charAt(0).toUpperCase() + label.slice(1) + ' deleted'); after(); }
-    catch (x) { closeModal(); toast(x.message); }
-  });
+// `opts.restorePath` names an endpoint (only 'audit-restore' today) that can
+// undo this exact deletion; when the DELETE response carries an `audit_id`,
+// the success toast offers Undo instead of just confirming the delete.
+function adminDelete(path, id, label, after, opts = {}) {
+  const title = opts.title || `${opts.confirmLabel || 'Delete'} this ${label}?`;
+  const message = opts.message || `This permanently deletes this ${esc(label)} and cannot be undone.`;
+  confirmModal(title, message, async (reason) => {
+    try {
+      const result = await api(`${path}?id=${id}`, { method: 'DELETE', body: JSON.stringify({ reason: reason || '' }) });
+      closeModal();
+      const doneLabel = opts.doneLabel || (label.charAt(0).toUpperCase() + label.slice(1) + ' deleted');
+      if (opts.restorePath && result.audit_id) {
+        toast(doneLabel, { label: 'Undo', onClick: async () => {
+          try { await api(opts.restorePath, { method: 'POST', body: JSON.stringify({ audit_id: result.audit_id }) }); toast('Restored'); go(S.view); }
+          catch (x) { toast(x.message); }
+        } });
+      } else toast(doneLabel);
+      after();
+    } catch (x) { closeModal(); toast(x.message); }
+  }, { reason: opts.reason, confirmLabel: opts.confirmLabel, danger: opts.danger });
 }
 const roleName = r => ({ programme_lead: 'Programme Lead', supervisor: 'Supervisor', intern: 'Intern', management: 'Management' }[r] || r);
 const metric = (label, value, note = '') => `<div class="card metric"><label>${label}</label><strong>${value}</strong><div class="muted">${note}</div></div>`;
@@ -313,7 +367,7 @@ async function interns() {
   const rows = data.map(x => {
     const s = x.requirement_summary || {};
     const attention = s.at_risk_components ? 'Target at risk' : s.watch_components ? 'Watch' : 'On track';
-    return `<tr class="click" data-id="${x.id}"><td><b>${esc(x.display_name)}</b><br>${esc(x.email)}</td><td>${esc(x.institution || '—')}</td><td>${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td>${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td>${tag(attention)}</td><td>${x.active_cases}</td><td><span class="tag ${x.identity_user_id ? 'green' : 'amber'}">${x.identity_user_id ? 'Login linked' : 'No login linked'}</span></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}">Delete</button></td>` : ''}</tr>`;
+    return `<tr class="click" data-id="${x.id}"><td><b>${esc(x.display_name)}</b>${x.active === false ? ' ' + tag('Deactivated') : ''}<br>${esc(x.email)}</td><td>${esc(x.institution || '—')}</td><td>${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td>${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td>${tag(attention)}</td><td>${x.active_cases}</td><td><span class="tag ${x.identity_user_id ? 'green' : 'amber'}">${x.identity_user_id ? 'Login linked' : 'No login linked'}</span></td>${isAdmin ? `<td>${x.active === false ? `<button class="btn small" data-reactivate-intern="${x.id}" data-name="${esc(x.display_name)}">Reactivate</button>` : `<button class="btn small danger-btn" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}">Deactivate</button>`}</td>` : ''}</tr>`;
   }).join('');
   $('#content').innerHTML = `<div class="section"><div><h3>Intern placements</h3><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
     ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account', ...(isAdmin ? ['Admin'] : [])], rows)}
@@ -322,7 +376,20 @@ async function interns() {
   $('#addIntern')?.addEventListener('click', () => { modal('Add intern', `<form id="fIntern" class="formgrid"><div class="field"><label>Name<input name="display_name" required></label></div><div class="field"><label>Email<input name="email" type="email" required></label></div><div class="field"><label>Institution<select name="institution"><option>SACAP</option><option>Cornerstone Institute</option><option>Other</option></select></label></div><div class="field"><label>Default counselling session length (min)<input name="default_session_minutes" type="number" min="15" max="240" value="60"></label></div><div class="field"><label>Placement start<input name="placement_start" type="date"></label></div><div class="field"><label>Placement end<input name="placement_end" type="date"></label></div><div class="full"><button class="btn primary">Create placement</button></div></form>`); });
   $$('[data-del-intern]').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
-    adminDelete('interns', b.dataset.delIntern, `intern placement for ${b.dataset.delName} (and all of their cases, hours, supervision and history)`, () => go('interns'));
+    adminDelete('interns', b.dataset.delIntern, `placement for ${b.dataset.delName}`, () => go('interns'), {
+      confirmLabel: 'Deactivate',
+      title: `Deactivate the placement for ${esc(b.dataset.delName)}?`,
+      message: `${esc(b.dataset.delName)} will no longer be able to sign in or appear in active lists. Their cases, hours, supervision and report history are kept and stay visible to programme staff — you can reactivate this placement from this screen at any time.`,
+      doneLabel: `${b.dataset.delName}’s placement deactivated`,
+      reason: { required: true, label: 'Reason for deactivating' }
+    });
+  }));
+  $$('[data-reactivate-intern]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    confirmModal(`Reactivate the placement for ${esc(b.dataset.name)}?`, `${esc(b.dataset.name)} will be able to sign in again and reappear in active lists.`, async () => {
+      try { await api('interns', { method: 'PATCH', body: JSON.stringify({ id: b.dataset.reactivateIntern, action: 'reactivate' }) }); closeModal(); toast(`${b.dataset.name}’s placement reactivated`); go('interns'); }
+      catch (x) { closeModal(); toast(x.message); }
+    }, { confirmLabel: 'Reactivate', danger: false });
   }));
 }
 async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { const created = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); setActiveIntern(created); closeModal(); toast(created.invite?.sent ? 'Placement created · invite email sent' : created.invite && !created.invite.sent ? `Placement created, but the invite email failed: ${created.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
@@ -346,7 +413,7 @@ async function referrals() {
   const open = data.filter(x => !String(x.status).startsWith('Closed')).length;
   const overdue = data.filter(x => x.next_action_date && x.next_action_date < today() && !String(x.status).startsWith('Closed')).length;
   const isAdmin = S.session.role === 'programme_lead';
-  const rows = data.map(x => `<tr><td><b>${esc(x.referral_code)}</b></td>${own?'':`<td>${esc(x.intern_name)}</td>`}<td>${esc(x.referral_date)}</td><td>${esc(x.referral_source||'—')}</td><td>${esc(x.site||'—')}</td><td>${esc(x.presenting_category||'—')}</td><td>${tag(x.priority)}</td><td>${tag(x.status)}</td><td>${x.contact_attempts}</td><td>${x.next_action_date?esc(x.next_action_date):'—'}</td><td>${x.update_category?tag(x.update_category):'—'}${x.last_update?`<br><small class="muted">${esc(x.last_update)}</small>`:''}</td><td><button class="btn small" data-referral-update="${x.id}">Update</button>${isAdmin?` <button class="btn small danger-btn" data-del-referral="${x.id}">Delete</button>`:''}</td></tr>`).join('');
+  const rows = data.map(x => `<tr><td><b>${esc(x.referral_code)}</b></td>${own?'':`<td>${esc(x.intern_name)}</td>`}<td>${esc(x.referral_date)}</td><td>${esc(x.referral_source||'—')}</td><td>${esc(x.site||'—')}</td><td>${esc(x.presenting_category||'—')}</td><td>${tag(x.priority)}</td><td>${tag(x.status)}</td><td>${x.contact_attempts}</td><td>${x.next_action_date?esc(x.next_action_date):'—'}</td><td>${x.update_category?tag(x.update_category):'—'}${x.last_update?`<br><small class="muted">${esc(x.last_update)}</small>`:''}</td><td><button class="btn small" data-referral-update="${x.id}">Update</button>${isAdmin?` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}">Delete</button>`:''}</td></tr>`).join('');
   $('#content').innerHTML = `<div class="hero"><small>De-identified workflow</small><h1>${own?'Track the referrals allocated to you.':'See what happened after each referral was allocated.'}</h1><p>Record contact progress, booking, intake and closure so referrals do not disappear from view.</p><div class="actions"><button id="addReferral" class="btn">Add referral</button></div></div>
     <div class="grid metrics">${metric('Open referrals',open)}${metric('Overdue next actions',overdue)}${metric('Total tracked',data.length)}${metric('Awaiting feedback',data.filter(x=>x.status==='Awaiting feedback').length)}</div>
     <div class="section"><div><h3>${own?'My referral list':S.intern?esc(S.intern.display_name)+' · referrals':'All intern referrals'}</h3><p>Status and a short operational update are visible to the intern and supervisor.</p></div></div>
@@ -354,7 +421,11 @@ async function referrals() {
     <div class="notice info" style="margin-top:12px">Do not enter patient names, ID numbers, phone numbers, addresses or clinical narrative. Keep clinical documentation in the approved patient record.</div>`;
   $('#addReferral').onclick=()=>referralModal(null,internsData);
   $$('[data-referral-update]').forEach(b=>b.onclick=()=>referralModal(data.find(x=>x.id==b.dataset.referralUpdate),internsData));
-  $$('[data-del-referral]').forEach(b=>b.onclick=()=>adminDelete('referrals', b.dataset.delReferral, 'referral', () => go('referrals')));
+  $$('[data-del-referral]').forEach(b=>b.onclick=()=>adminDelete('referrals', b.dataset.delReferral, `referral ${b.dataset.code}`, () => go('referrals'), {
+    message: `This permanently deletes referral ${esc(b.dataset.code)} unless undone. It can be restored from the confirmation toast right after deleting.`,
+    reason: { required: false, label: 'Reason (optional)' },
+    restorePath: 'audit-restore'
+  }));
 }
 function referralModal(item, internsData) {
   const isEdit=!!item, own=S.session.role==='intern';
@@ -413,7 +484,7 @@ async function cases() {
   const id = activeId(), query = id ? `cases?intern_id=${id}` : 'cases', data = await api(query);
   const canPlan = ['programme_lead', 'supervisor'].includes(S.session.role);
   const isAdmin = S.session.role === 'programme_lead';
-  const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${esc(x.site)}</td>${id ? '' : `<td>${esc(x.intern_name)}</td>`}<td>${esc(x.presenting_category || '—')}</td><td>${x.sessions}</td><td>${canPlan ? `<select data-frequency="${x.id}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td>${tag(x.supervision_status)}</td><td><select data-status="${x.id}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}">Record session</button></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-case="${x.id}">Delete</button></td>` : ''}</tr>`).join('');
+  const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${esc(x.site)}</td>${id ? '' : `<td>${esc(x.intern_name)}</td>`}<td>${esc(x.presenting_category || '—')}</td><td>${x.sessions}</td><td>${canPlan ? `<select data-frequency="${x.id}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td>${tag(x.supervision_status)}</td><td><select data-status="${x.id}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}">Record session</button></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-case="${x.id}" data-code="${esc(x.case_code)}" data-sessions="${x.sessions}">Delete</button></td>` : ''}</tr>`).join('');
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${S.session.role === 'intern' ? 'My cases' : id ? esc(S.intern.display_name) + ' · cases' : 'All cases'}</h3><p>De-identified workflow. Frequency feeds the caseload adequacy calculation.</p></div>${['programme_lead', 'supervisor'].includes(S.session.role) && id ? '<button id="addCase" class="btn primary">Allocate case</button>' : ''}</div>
     ${table(['Case code', 'Site', ...(id ? [] : ['Intern']), 'Category', 'Sessions', 'Planned frequency', 'Supervision', 'Status', 'Activity', ...(isAdmin ? ['Admin'] : [])], rows)}
     <div class="notice info" style="margin-top:12px">Individual counselling hours are calculated from attended session duration. Do not enter patient names, ID numbers, phone numbers, addresses or narrative clinical notes.</div>`;
@@ -421,7 +492,13 @@ async function cases() {
   $$('[data-status]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.status, status: sel.value }) }); toast('Status updated'); });
   $$('[data-frequency]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.frequency, planned_frequency_weeks: +sel.value }) }); toast('Frequency updated'); });
   $$('[data-act]').forEach(b => b.onclick = () => activityModal(data.find(x => x.id == b.dataset.act)));
-  $$('[data-del-case]').forEach(b => b.onclick = () => adminDelete('cases', b.dataset.delCase, 'case (and its recorded sessions)', () => go('cases')));
+  $$('[data-del-case]').forEach(b => b.onclick = () => {
+    const sessions = Number(b.dataset.sessions || 0);
+    adminDelete('cases', b.dataset.delCase, `case ${b.dataset.code}`, () => go('cases'), {
+      message: `This permanently deletes case ${esc(b.dataset.code)}${sessions ? ` and its ${sessions} recorded session${sessions === 1 ? '' : 's'}` : ''}. This cannot be undone.`,
+      reason: { required: true, label: 'Reason for deleting' }
+    });
+  });
   $('#addCase')?.addEventListener('click', () => { modal('Allocate de-identified case', `<form id="fCase" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Case code<input name="case_code" placeholder="KHC-026" required></label></div><div class="field"><label>Site<select name="site" required>${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Presenting category<select name="presenting_category">${presentingCategoryOptions()}</select></label></div>${presentingCategoryOtherField()}<div class="field"><label>Planned frequency<select name="planned_frequency_weeks"><option value="1">Weekly</option><option value="2">Fortnightly</option><option value="4">Monthly</option></select></label></div><div class="full"><button class="btn primary">Allocate</button></div></form>`); bindSiteToggle($('#fCase')); bindPresentingCategoryToggle($('#fCase')); });
 }
 async function saveCase(e) { if (e.target.id !== 'fCase') return; e.preventDefault(); try { await api('cases', { method: 'POST', body: JSON.stringify(resolvePresentingCategory(resolveSite(Object.fromEntries(new FormData(e.target))))) }); closeModal(); toast('Case allocated'); go('cases'); } catch (x) { toast(x.message); } }
@@ -444,11 +521,15 @@ async function supervision() {
     if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   }
   const id = activeId(), data = await api(`supervision?intern_id=${id}`), isIntern = S.session.role === 'intern', isAdmin = S.session.role === 'programme_lead';
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h3><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}">Delete</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h3><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}" data-topic="${esc(x.topic)}">Delete</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
   bindInternSwitcher();
   $('#addSup').onclick = () => supervisionModal(id);
   $$('[data-review]').forEach(b => b.onclick = () => { const x = data.find(i => i.id == b.dataset.review); modal('Review supervision item', `<form id="fSupReview"><input type="hidden" name="id" value="${x.id}"><div class="field"><label>Supervisor response<textarea name="supervisor_note">${esc(x.supervisor_note || '')}</textarea></label></div><div class="field"><label>Status<select name="status"><option>Open</option><option selected>Reviewed</option><option>Closed</option></select></label></div><button class="btn primary">Save</button></form>`); });
-  $$('[data-del-sup]').forEach(b => b.onclick = () => adminDelete('supervision', b.dataset.delSup, 'supervision item', () => go('supervision')));
+  $$('[data-del-sup]').forEach(b => b.onclick = () => adminDelete('supervision', b.dataset.delSup, `supervision item “${b.dataset.topic}”`, () => go('supervision'), {
+    message: `This permanently deletes the supervision item “${esc(b.dataset.topic)}” unless undone. It can be restored from the confirmation toast right after deleting.`,
+    reason: { required: false, label: 'Reason (optional)' },
+    restorePath: 'audit-restore'
+  }));
 }
 function supervisionModal(id, preset = {}) { modal('Add to supervision', `<form id="fSup" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Topic<input name="topic" value="${esc(preset.topic || '')}" required></label></div><div class="field"><label>Priority<select name="priority"><option>Routine</option><option>Important</option><option>Risk / urgent</option></select></label></div><div class="full field"><label>What exactly are you unsure about?<textarea name="question" required>${esc(preset.question || '')}</textarea></label></div><div class="full field"><label>What have you already considered / tried?<textarea name="action_taken">${esc(preset.action_taken || '')}</textarea></label></div><div class="full"><button class="btn primary">Add to supervision</button></div></form>`); }
 async function saveSup(e) { if (e.target.id !== 'fSup') return; e.preventDefault(); try { await api('supervision', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Added to supervision'); if (S.view === 'supervision') go('supervision'); } catch (x) { toast(x.message); } }
@@ -481,12 +562,24 @@ async function hours() {
   const isAdmin = S.session.role === 'programme_lead';
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>Activity log</h3><p>Log non-individual counselling activities directly against the institution’s formal categories.</p></div><button id="logHours" class="btn primary">Log activity hours</button></div>
     <div class="grid two"><div class="notice info"><b>Individual counselling is automatic.</b><br>Attended case sessions and their duration feed the counselling requirement. Do not log those hours again here.</div><div class="card"><b>${esc(req.profile.requirement_profile_name || '')}</b><p class="muted">${fmt(req.summary.total_completed)} of ${fmt(req.summary.total_target)} formal hours currently recorded.</p>${progressBar(req.summary.total_completed, req.summary.total_target)}</div></div>
-    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b><br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small danger-btn" data-del-hours="${x.id}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
+    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b><br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small" data-edit-hours="${x.id}">Edit</button> <button class="btn small danger-btn" data-del-hours="${x.id}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
   bindInternSwitcher();
   $('#logHours').onclick = () => modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`);
-  $$('[data-del-hours]').forEach(b => b.onclick = () => adminDelete('hours', b.dataset.delHours, 'activity entry', () => go('hours')));
+  // Prompt 4: "a correction workflow for logged hours rather than silent
+  // destructive deletion" — Edit updates the entry in place (with a
+  // mandatory reason, audited as a before/after pair) instead of requiring
+  // programme_lead to delete and re-create it.
+  $$('[data-edit-hours]').forEach(b => b.onclick = () => {
+    const x = data.entries.find(e => e.id == b.dataset.editHours);
+    modal('Correct activity entry', `<form id="fHoursEdit" class="formgrid"><input type="hidden" name="id" value="${x.id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${data.components.map(c => `<option value="${esc(c.code)}" ${c.code === x.component_code ? 'selected' : ''}>${esc(c.manual_label || c.name)}</option>`).join('')}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${esc(x.work_date)}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" value="${x.hours}" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information">${esc(x.note || '')}</textarea></label></div><div class="full field"><label>Reason for this correction<textarea name="reason" required placeholder="e.g. wrong category selected, date entered incorrectly"></textarea></label></div><div class="full"><button class="btn primary">Save correction</button></div></form>`);
+  });
+  $$('[data-del-hours]').forEach(b => b.onclick = () => adminDelete('hours', b.dataset.delHours, 'activity entry', () => go('hours'), {
+    message: 'This permanently deletes this logged activity entry. This cannot be undone — for a wrong category, date or hours value, use Edit instead.',
+    reason: { required: true, label: 'Reason for deleting' }
+  }));
 }
 async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
+async function saveHoursCorrection(e) { if (e.target.id !== 'fHoursEdit') return; e.preventDefault(); try { await api('hours', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity entry corrected'); go('hours'); } catch (x) { toast(x.message); } }
 
 async function reports() {
   const switcherHtml = await internSwitcherHtml();
@@ -496,25 +589,39 @@ async function reports() {
   const internName = isIntern ? S.session.profile.display_name : S.intern?.display_name;
   const data = await api(`reports?intern_id=${id}&month=${month()}-01`), s = data.stats || {};
   const refreshedAt = new Date().toLocaleString();
-  const reviewLine = data.report.status === 'Reviewed'
+  const alreadyReviewed = data.report.status === 'Reviewed';
+  const reviewLine = alreadyReviewed
     ? `Reviewed by ${esc(data.report.reviewed_by_name || 'unknown reviewer')}${data.report.reviewed_at ? ' on ' + esc(new Date(data.report.reviewed_at).toLocaleString()) : ''}`
     : data.report.status === 'Submitted' ? `Submitted${data.report.submitted_at ? ' on ' + esc(new Date(data.report.submitted_at).toLocaleString()) : ''} · awaiting review`
     : 'Not yet submitted';
+  // Prompt 4: "report-review finalisation... makes the resulting state
+  // unambiguous" — once a report is Reviewed, re-clicking updates only the
+  // comment (the server no longer re-stamps reviewer/time, see 0007), so the
+  // button says so instead of implying a second "Mark reviewed" action.
+  const reviewBtnLabel = isIntern ? 'Submit report' : (alreadyReviewed ? 'Update comment' : 'Mark reviewed');
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'My monthly report' : 'Monthly report'} · ${esc(internName || '')}</h3><p>${esc(institution || 'Institution not set')} · ${month()}</p></div><span class="tag">${esc(data.report.status)}</span></div>
     <div class="notice info" style="margin-top:-4px;margin-bottom:14px">${reviewLine} · data refreshed ${esc(refreshedAt)}</div>
     <div class="grid metrics">${metric('Booked', s.booked || 0)}${metric('Attended', s.attended || 0)}${metric('Female', s.female || 0)}${metric('Male', s.male || 0)}</div>
     <div class="grid metrics" style="margin-top:14px">${metric('Intake', s.intake_sessions || 0)}${metric('Follow-ups', s.follow_up_sessions || 0)}${metric('Terminations', s.termination_sessions || 0)}${metric('Counselling time', fmt((s.counselling_minutes || 0) / 60) + ' h')}</div>
     <div class="section"><h3>Formal requirement hours this month</h3></div><div class="card list">${data.hours.map(x => `<div class="row"><div class="grow">${esc(x.name)}</div><b>${fmt(x.total)} h</b></div>`).join('') || 'No hours recorded.'}</div>
-    <div class="section"><h3>${isIntern ? 'Submission' : 'Supervisor review'}</h3></div><div class="card field"><label>${isIntern ? 'Reflection / notable activity' : 'Supervisor comment'}<textarea id="comment">${esc(isIntern ? data.report.intern_comment || '' : data.report.supervisor_comment || '')}</textarea></label><button id="sendReport" class="btn primary">${isIntern ? 'Submit report' : 'Mark reviewed'}</button></div>`;
+    <div class="section"><h3>${isIntern ? 'Submission' : 'Supervisor review'}</h3></div><div class="card field"><label>${isIntern ? 'Reflection / notable activity' : 'Supervisor comment'}<textarea id="comment">${esc(isIntern ? data.report.intern_comment || '' : data.report.supervisor_comment || '')}</textarea></label><button id="sendReport" class="btn primary">${reviewBtnLabel}</button></div>`;
   bindInternSwitcher();
-  $('#sendReport').onclick = async () => {
-    if (!activeId()) { toast('No intern selected — cannot submit or review this report.'); return; }
+  const submitReport = async () => {
     const btn = $('#sendReport'); if (btn.disabled) return; btn.disabled = true; const original = btn.textContent; btn.textContent = 'Saving…';
     try {
       const body = { intern_profile_id: id, month: month() + '-01' }; body[isIntern ? 'intern_comment' : 'supervisor_comment'] = $('#comment').value;
-      await api('reports', { method: 'POST', body: JSON.stringify(body) });
-      toast(isIntern ? 'Submitted' : 'Reviewed'); go('reports');
+      const result = await api('reports', { method: 'POST', body: JSON.stringify(body) });
+      toast(isIntern ? 'Report submitted' : (result.already_reviewed ? `Comment updated — already reviewed by ${result.reviewed_by_name || 'a reviewer'}` : 'Report marked reviewed'));
+      go('reports');
     } catch (x) { toast(x.message); btn.disabled = false; btn.textContent = original; }
+  };
+  $('#sendReport').onclick = () => {
+    if (!activeId()) { toast('No intern selected — cannot submit or review this report.'); return; }
+    if (!isIntern && !alreadyReviewed) {
+      confirmModal('Mark this report reviewed?', `This records you as the reviewer with today’s timestamp — that identity and time cannot be reassigned to someone else afterwards. ${esc(internName || 'This intern')}’s ${month()} report will be marked Reviewed.`, async () => { closeModal(); await submitReport(); }, { confirmLabel: 'Mark reviewed', danger: false });
+    } else {
+      submitReport();
+    }
   };
 }
 
@@ -527,9 +634,13 @@ async function feedbackView(){
   const isIntern=S.session.role==='intern', isAdmin=S.session.role==='programme_lead';
   $('#content').innerHTML=switcherHtml+`<div class="hero"><small>Live pilot</small><h1>${isIntern?'Help shape the Practicum Hub.':'Pilot feedback'}</h1><p>${isIntern?'Tell us what is useful, what gets in your way, and what you expected to find but could not.':'Review what the intern is experiencing so the system improves during the pilot.'}</p></div>
     ${isIntern?`<div class="card" style="margin-top:14px"><form id="fFeedback" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Type<select name="feedback_type"><option>What worked</option><option>What was frustrating</option><option>I could not find something</option><option>Suggestion</option><option>General</option></select></label></div><div class="field"><label>How useful was the Hub today? (1–5)<input name="rating" type="number" min="1" max="5"></label></div><div class="full field"><label>Feedback<textarea name="message" required placeholder="Be specific — what were you trying to do?"></textarea></label></div><div class="full"><button class="btn primary">Send feedback</button></div></form></div>`:''}
-    <div class="section"><div><h3>Feedback history</h3><p>Used during the Erin pilot to drive weekly iteration.</p></div></div><div class="card list">${data.map(x=>`<div class="row"><div class="grow"><b>${esc(x.feedback_type)}</b> ${x.rating?`<span class="tag">${x.rating}/5</span>`:''}<br><span>${esc(x.message)}</span><br><small class="muted">${esc(String(x.created_at||'').slice(0,10))}${x.context_view?' · '+esc(x.context_view):''}</small></div>${tag(x.status||'New')}${isAdmin?`<button class="btn small danger-btn" data-del-feedback="${x.id}">Delete</button>`:''}</div>`).join('')||'No feedback yet.'}</div>`;
+    <div class="section"><div><h3>Feedback history</h3><p>Used during the Erin pilot to drive weekly iteration.</p></div></div><div class="card list">${data.map(x=>`<div class="row"><div class="grow"><b>${esc(x.feedback_type)}</b> ${x.rating?`<span class="tag">${x.rating}/5</span>`:''}<br><span>${esc(x.message)}</span><br><small class="muted">${esc(String(x.created_at||'').slice(0,10))}${x.context_view?' · '+esc(x.context_view):''}</small></div>${tag(x.status||'New')}${isAdmin?`<button class="btn small danger-btn" data-del-feedback="${x.id}" data-type="${esc(x.feedback_type)}">Delete</button>`:''}</div>`).join('')||'No feedback yet.'}</div>`;
   bindInternSwitcher();
-  $$('[data-del-feedback]').forEach(b=>b.onclick=()=>adminDelete('feedback', b.dataset.delFeedback, 'feedback entry', () => go('feedback')));
+  $$('[data-del-feedback]').forEach(b=>b.onclick=()=>adminDelete('feedback', b.dataset.delFeedback, `“${b.dataset.type}” feedback entry`, () => go('feedback'), {
+    message: `This permanently deletes this ${esc(b.dataset.type)} feedback entry unless undone. It can be restored from the confirmation toast right after deleting.`,
+    reason: { required: false, label: 'Reason (optional)' },
+    restorePath: 'audit-restore'
+  }));
 }
 
 const GUIDES = [
