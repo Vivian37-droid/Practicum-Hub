@@ -45,7 +45,7 @@ export function createMockAdmin(queue = []) {
   const admin = {
     from: vi.fn(builder),
     rpc: vi.fn((name, args) => Promise.resolve(resolveNext({ rpc: name, args }))),
-    auth: { getUser: vi.fn(), admin: { deleteUser: vi.fn(), inviteUserByEmail: vi.fn() } }
+    auth: { getUser: vi.fn(), admin: { deleteUser: vi.fn(), inviteUserByEmail: vi.fn(), getUserById: vi.fn() } }
   };
   return { admin, calls };
 }
@@ -123,7 +123,7 @@ export function createNamedMockAdmin({ tables = {}, rpcs = {} } = {}) {
       calls.push({ rpc: name, args, result });
       return Promise.resolve(result);
     }),
-    auth: { getUser: vi.fn(), admin: { deleteUser: vi.fn(), inviteUserByEmail: vi.fn() } }
+    auth: { getUser: vi.fn(), admin: { deleteUser: vi.fn(), inviteUserByEmail: vi.fn(), getUserById: vi.fn() } }
   };
   return { admin, calls };
 }
