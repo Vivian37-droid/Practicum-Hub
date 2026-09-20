@@ -9,8 +9,7 @@
     "deploy": "wrangler pages deploy public --compatibility-date=2026-09-01 --compatibility-flags=nodejs_compat"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.116.0",
-    "postgres": "^3.4.9"
+    "@supabase/supabase-js": "^2.116.0"
   },
   "devDependencies": {
     "wrangler": "^3.78.0"

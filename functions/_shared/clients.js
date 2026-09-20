@@ -1,37 +1,19 @@
-// Two Supabase-facing clients, mirroring what the old stack split across
-// @netlify/database (direct Postgres access) and @netlify/identity (auth):
+// Single Supabase-facing client, reached only over HTTP (PostgREST + GoTrue)
+// via supabase-js. An earlier version of this file also exported getSql(env),
+// a raw Postgres connection over postgres.js for Cloudflare Workers' TCP
+// socket API — but functions/api/_handlers.js never actually called it; every
+// handler has always gone through getAdmin().from()/.rpc() instead. Removing
+// the unused export and the postgres dependency it required.
 //
-// - getSql(env): a direct Postgres connection (via postgres.js, which has
-//   first-class support for Cloudflare Workers' TCP socket API — the same
-//   runtime Pages Functions use) against Supabase's connection pooler. This
-//   lets the query logic below be a near-literal port of the old
-//   `db.pool.query('...$1...', [params])` calls, instead of a rewrite
-//   against a different query builder — deliberately, to avoid introducing
-//   new bugs in the pace/projection math while changing the stack under it.
-// - getAdmin(env): the supabase-js client using the service_role key, used
-//   only for verifying a caller's auth token (auth.getUser) and for sending
-//   Supabase Auth invite emails (auth.admin.inviteUserByEmail) — the fix for
-//   REBUILD_SPEC.md §5's "adding an intern doesn't send an invite" gap.
+// getAdmin(env) is used for everything: verifying a caller's auth token
+// (auth.getUser), sending invite emails (auth.admin.inviteUserByEmail), and
+// all data access via .from()/.rpc() with the service_role key (which
+// bypasses Row Level Security).
 //
-// Both are cached on `globalThis` so a warm Worker isolate reuses the same
-// connection/client across requests instead of reconnecting every time.
+// Cached on `globalThis` so a warm Worker isolate reuses the same client
+// across requests instead of re-creating it every time.
 
-import postgres from 'postgres';
 import { createClient } from '@supabase/supabase-js';
-
-export function getSql(env) {
-  if (!globalThis.__phSql) {
-    if (!env.SUPABASE_DB_URL) throw new Error('SUPABASE_DB_URL is not configured');
-    globalThis.__phSql = postgres(env.SUPABASE_DB_URL, {
-      ssl: env.SUPABASE_DB_SSL === 'false' ? false : 'require',
-      max: 3,
-      idle_timeout: 20,
-      connect_timeout: 10,
-      prepare: false
-    });
-  }
-  return globalThis.__phSql;
-}
 
 export function getAdmin(env) {
   if (!globalThis.__phAdmin) {
