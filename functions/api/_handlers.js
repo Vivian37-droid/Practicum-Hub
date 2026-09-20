@@ -139,7 +139,15 @@ async function requirementProgress(env, id) {
   const bookingsNeeded = sessionsNeeded == null || attendance == null ? null : sessionsNeeded / attendance;
   const recentClinicalWeeklyPace = num(clinical?.recent_weekly_pace);
   const estimatedClinicalWeeksToTarget = clinical?.remaining != null && recentClinicalWeeklyPace > 0 ? num(clinical.remaining) / recentClinicalWeeklyPace : null;
-  const estimatedClinicalTargetDate = estimatedClinicalWeeksToTarget == null ? null : new Date(now.getTime() + estimatedClinicalWeeksToTarget * 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // Prompt 8: "present implausibly distant projections as 'not viable at
+  // current pace' rather than a falsely precise date." A ~6-month
+  // practicum projecting a completion date years out at the current pace
+  // isn't a useful estimate — it's noise dressed up as precision. 104
+  // weeks (2 years) is a generous cap: nothing this app tracks plausibly
+  // extends a placement anywhere near that far.
+  const PACE_HORIZON_WEEKS = 104;
+  const clinicalPaceNotViable = estimatedClinicalWeeksToTarget != null && estimatedClinicalWeeksToTarget > PACE_HORIZON_WEEKS;
+  const estimatedClinicalTargetDate = (estimatedClinicalWeeksToTarget == null || clinicalPaceNotViable) ? null : new Date(now.getTime() + estimatedClinicalWeeksToTarget * 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const plannedWeeklyBookings = num(activeCases.weekly_bookings);
   const expectedAttended = plannedWeeklyBookings * (attendance ?? 1);
   const expectedClinicalHours = expectedAttended * sessionHours;
@@ -175,6 +183,7 @@ async function requirementProgress(env, id) {
       recent_clinical_weekly_pace: recentClinicalWeeklyPace ? round(recentClinicalWeeklyPace, 1) : null,
       estimated_clinical_weeks_to_target: estimatedClinicalWeeksToTarget == null ? null : round(estimatedClinicalWeeksToTarget, 1),
       estimated_clinical_target_date: estimatedClinicalTargetDate,
+      clinical_pace_not_viable: clinicalPaceNotViable,
       active_cases: num(activeCases.n),
       planned_bookings_from_caseload: round(plannedWeeklyBookings, 1),
       expected_attended_sessions: round(expectedAttended, 1),
@@ -337,11 +346,55 @@ export async function interns(ctx, env, url, body, method) {
     await audit(ctx, env, 'reactivate', 'intern', internId, { display_name: row.display_name }, internId);
     return { ok: true, reactivated_id: internId };
   }
+  // Prompt 8: "invitation date, invitation status, last login and a safe
+  // resend-invitation action." Supabase Auth already tracks invited_at/
+  // confirmed_at/last_sign_in_at on the auth user itself — no new columns
+  // needed, just surfacing what's already there.
+  if (method === 'PATCH' && body.action === 'resend_invite') {
+    requireRole(ctx, ['programme_lead']);
+    const internId = Number(body.id || 0);
+    if (!internId) throw new HttpError(400, 'Intern id is required');
+    const { data: row, error } = await admin.from('profiles').select('id, display_name, email, identity_user_id').eq('id', internId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Intern not found');
+    // Safe = never resend to someone who has already accepted and signed
+    // in; that would be confusing at best, and inviteUserByEmail is meant
+    // for first-time setup, not an already-active account.
+    if (row.identity_user_id) {
+      const { data: authLookup, error: authErr } = await admin.auth.admin.getUserById(row.identity_user_id);
+      if (authErr) throw new HttpError(500, authErr.message);
+      if (authLookup?.user?.confirmed_at) throw new HttpError(400, `${row.display_name} has already accepted their invitation and signed in — resending is not needed.`);
+    }
+    const { error: inviteErr } = await admin.auth.admin.inviteUserByEmail(row.email, {
+      data: { display_name: row.display_name, roles: ['intern'] },
+      redirectTo: env.PUBLIC_SITE_URL ? `${env.PUBLIC_SITE_URL}/` : undefined
+    });
+    if (inviteErr) throw new HttpError(500, inviteErr.message);
+    await audit(ctx, env, 'resend_invite', 'intern', internId, { email: row.email }, internId);
+    return { ok: true, resent_id: internId };
+  }
   if (method === 'GET') {
     const supervisorId = ctx.role === 'supervisor' ? ctx.user.id : null;
     const listRows = unwrap(await admin.rpc('list_interns_with_counts', { p_supervisor_id: supervisorId, p_only_active: false }));
     let list = (listRows || []).map(r => r.profile);
-    list = await Promise.all(list.map(async p => ({ ...p, requirement_summary: (await requirementProgress(env, p.id)).summary })));
+    list = await Promise.all(list.map(async p => {
+      let invite = { status: 'Not yet invited', invited_at: null, last_sign_in_at: null };
+      if (p.identity_user_id) {
+        try {
+          const { data: authLookup, error: authErr } = await admin.auth.admin.getUserById(p.identity_user_id);
+          if (authErr) throw authErr;
+          const u = authLookup?.user;
+          invite = {
+            status: u?.confirmed_at ? 'Active' : 'Invited — pending',
+            invited_at: u?.invited_at || u?.created_at || null,
+            last_sign_in_at: u?.last_sign_in_at || null
+          };
+        } catch (e) {
+          invite = { status: 'Unknown', invited_at: null, last_sign_in_at: null };
+        }
+      }
+      return { ...p, requirement_summary: (await requirementProgress(env, p.id)).summary, invite };
+    }));
     return list;
   }
   requireRole(ctx, ['programme_lead']);
@@ -607,7 +660,23 @@ export async function hoursView(ctx, env, url, body, method) {
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
     const entryRows = unwrap(await admin.rpc('hours_entries_with_component', { p_intern_id: id }));
-    const entries = (entryRows || []).map(r => r.entry);
+    let entries = (entryRows || []).map(r => r.entry);
+    // Prompt 8: "add edit/correction history" for the Activity log itself
+    // (Prompt 4 already built the correction workflow and audit trail;
+    // Prompt 7 surfaced it on Reports — this is the same audit_log data
+    // shown directly against each entry here).
+    const entryIds = entries.map(e => String(e.id));
+    if (entryIds.length) {
+      const { data: historyRows, error: histErr } = await admin.from('audit_log').select('entity_id, reason, created_at, detail')
+        .eq('entity_type', 'hours').eq('action', 'correct').in('entity_id', entryIds).order('created_at', { ascending: false });
+      if (histErr) throw new HttpError(500, histErr.message);
+      const historyByEntryId = {};
+      for (const h of (historyRows || [])) {
+        const detail = h.detail ? JSON.parse(h.detail) : null;
+        (historyByEntryId[h.entity_id] ||= []).push({ created_at: h.created_at, reason: h.reason, before: detail?.before, after: detail?.after });
+      }
+      entries = entries.map(e => ({ ...e, correction_history: historyByEntryId[String(e.id)] || [] }));
+    }
     const { data: profileRow, error: profErr } = await admin.from('profiles').select('requirement_profile_id').eq('id', id).maybeSingle();
     if (profErr) throw new HttpError(500, profErr.message);
     const components = unwrap(await admin.from('requirement_components').select('*')
@@ -675,8 +744,9 @@ export async function supervision(ctx, env, url, body, method) {
     const status = body.status || row.status;
     if (!SUPERVISION_STATUSES.has(status)) throw new HttpError(400, 'Invalid supervision status');
     const note = body.supervisor_note == null ? row.supervisor_note : limited(body.supervisor_note, 3000, 'Supervisor response');
+    const dueDate = body.due_date === undefined ? row.due_date : (body.due_date ? dateValue(body.due_date, 'Due date') : null);
     const updated = unwrap(await admin.from('supervision_items').update({
-      supervisor_note: note, status, updated_at: new Date().toISOString()
+      supervisor_note: note, status, due_date: dueDate, updated_at: new Date().toISOString()
     }).eq('id', row.id).select().single());
     await audit(ctx, env, 'review', 'supervision', row.id, { status }, row.intern_profile_id);
     return updated;
@@ -684,7 +754,20 @@ export async function supervision(ctx, env, url, body, method) {
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
     const rows = unwrap(await admin.from('supervision_items').select('*, cases(case_code)').eq('intern_profile_id', id).order('created_at', { ascending: false }));
-    const mapped = rows.map(r => { const { cases: c, ...rest } = r; return { ...rest, case_code: c?.case_code ?? null }; });
+    let mapped = rows.map(r => { const { cases: c, ...rest } = r; return { ...rest, case_code: c?.case_code ?? null }; });
+    // Prompt 8: "assigned supervisor" — resolved from profiles by identity
+    // user id (no direct FK PostgREST could embed automatically, since
+    // assigned_supervisor_identity_user_id references auth.users, not
+    // profiles) rather than a second round trip per row.
+    const supervisorIds = [...new Set(mapped.map(r => r.assigned_supervisor_identity_user_id).filter(Boolean))];
+    if (supervisorIds.length) {
+      const { data: supervisorProfiles, error: spErr } = await admin.from('profiles').select('identity_user_id, display_name').in('identity_user_id', supervisorIds);
+      if (spErr) throw new HttpError(500, spErr.message);
+      const nameById = Object.fromEntries((supervisorProfiles || []).map(p => [p.identity_user_id, p.display_name]));
+      mapped = mapped.map(r => ({ ...r, assigned_supervisor_name: r.assigned_supervisor_identity_user_id ? (nameById[r.assigned_supervisor_identity_user_id] || null) : null }));
+    } else {
+      mapped = mapped.map(r => ({ ...r, assigned_supervisor_name: null }));
+    }
     // Old SQL: ORDER BY CASE WHEN status = 'Open' THEN 0 ELSE 1 END, created_at DESC.
     // Array#sort is stable, so sorting the already created_at-desc-ordered
     // rows by "Open first" reproduces the same ordering.
@@ -700,12 +783,20 @@ export async function supervision(ctx, env, url, body, method) {
     if (linkErr) throw new HttpError(500, linkErr.message);
     if (!linkedCase) throw new HttpError(400, 'Case does not belong to this intern');
   }
+  const dueDate = body.due_date ? dateValue(body.due_date, 'Due date') : null;
+  // Prompt 8: "assigned supervisor" defaults to whoever the intern is
+  // already assigned to placement-wide — this surfaces who owns the item
+  // without needing a separate reassignment step for the common case.
+  const { data: internProfile, error: internErr } = await admin.from('profiles').select('supervisor_identity_user_id').eq('id', id).maybeSingle();
+  if (internErr) throw new HttpError(500, internErr.message);
   const row = unwrap(await admin.from('supervision_items').insert({
     intern_profile_id: id,
     case_id: caseId,
     topic: limited(body.topic, 200, 'Topic', true),
     question: limited(body.question, 3000, 'Question', true),
     priority,
+    due_date: dueDate,
+    assigned_supervisor_identity_user_id: internProfile?.supervisor_identity_user_id || null,
     action_taken: limited(body.action_taken, 3000, 'Action taken'),
     created_by_identity_user_id: ctx.user.id
   }).select().single());
@@ -728,8 +819,23 @@ export async function competencies(ctx, env, url, body, method) {
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
     const rows = unwrap(await admin.from('competency_definitions')
-      .select('*, competency_progress(intern_rating, supervisor_rating, evidence, supervisor_comment, intern_profile_id)')
+      .select('*, competency_progress(id, intern_rating, supervisor_rating, evidence, supervisor_comment, intern_profile_id)')
       .order('sort_order'));
+    // Prompt 8: "add evidence history, rating history and supervisor
+    // attribution" — reuses the audit trail every update already writes
+    // (see the audit() call below) rather than a second history table,
+    // same pattern as Reports' review_history and hours' corrections.
+    const progressIds = rows.map(d => (d.competency_progress || []).find(x => x.intern_profile_id === id)?.id).filter(Boolean).map(String);
+    const historyByProgressId = {};
+    if (progressIds.length) {
+      const { data: historyRows, error: histErr } = await admin.from('audit_log').select('entity_id, detail, created_at')
+        .eq('entity_type', 'competency_progress').in('entity_id', progressIds).order('created_at', { ascending: false });
+      if (histErr) throw new HttpError(500, histErr.message);
+      for (const h of (historyRows || [])) {
+        const detail = h.detail ? JSON.parse(h.detail) : {};
+        (historyByProgressId[h.entity_id] ||= []).push({ created_at: h.created_at, ...detail });
+      }
+    }
     return rows.map(d => {
       const { competency_progress, ...rest } = d;
       const p = (competency_progress || []).find(x => x.intern_profile_id === id);
@@ -738,7 +844,8 @@ export async function competencies(ctx, env, url, body, method) {
         intern_rating: p?.intern_rating ?? null,
         supervisor_rating: p?.supervisor_rating ?? null,
         evidence: p?.evidence ?? null,
-        supervisor_comment: p?.supervisor_comment ?? null
+        supervisor_comment: p?.supervisor_comment ?? null,
+        history: p?.id ? (historyByProgressId[String(p.id)] || []) : []
       };
     });
   }
@@ -755,16 +862,23 @@ export async function competencies(ctx, env, url, body, method) {
   const evidence = ctx.role === 'intern' ? (body.evidence ?? oldRow.evidence) : oldRow.evidence;
   const comment = ctx.role === 'intern' ? oldRow.supervisor_comment : (body.supervisor_comment ?? oldRow.supervisor_comment);
   for (const rating of [internRating, supervisorRating]) if (rating != null && (!Number.isInteger(Number(rating)) || Number(rating) < 1 || Number(rating) > 5)) throw new HttpError(400, 'Ratings must be between 1 and 5');
+  const limitedEvidence = limited(evidence, 3000, 'Evidence');
+  const limitedComment = limited(comment, 3000, 'Supervisor comment');
   const row = unwrap(await admin.from('competency_progress').upsert({
     intern_profile_id: id,
     competency_id: body.competency_id,
     intern_rating: internRating,
     supervisor_rating: supervisorRating,
-    evidence: limited(evidence, 3000, 'Evidence'),
-    supervisor_comment: limited(comment, 3000, 'Supervisor comment'),
+    evidence: limitedEvidence,
+    supervisor_comment: limitedComment,
     updated_by_identity_user_id: ctx.user.id,
     updated_at: new Date().toISOString()
   }, { onConflict: 'intern_profile_id,competency_id' }).select().single());
+  await audit(ctx, env, 'update', 'competency_progress', row.id, {
+    intern_rating: internRating, supervisor_rating: supervisorRating,
+    evidence: limitedEvidence, supervisor_comment: limitedComment,
+    actor_role: ctx.role, actor_name: ctx.profile.display_name || ctx.profile.email
+  }, id);
   return row;
 }
 
