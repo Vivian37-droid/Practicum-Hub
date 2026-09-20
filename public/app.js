@@ -133,6 +133,42 @@ function modal(title, html, closeLabel) {
 function closeModal() { closeDialog($('#modal')); }
 function openEmergency() { openDialog($('#em')); }
 function closeEmergency() { closeDialog($('#em')); }
+
+// Prompt 5: the mobile nav drawer gets the same backdrop/focus-trap/Escape/
+// return-focus treatment as a dialog, but isn't marked role="dialog" itself
+// — it's the persistent navigation landmark, just temporarily covering the
+// screen on narrow widths, not a one-off overlay.
+let drawerReturnFocus = null;
+function openDrawer() {
+  drawerReturnFocus = document.activeElement;
+  $('aside').classList.add('open');
+  $('#navBackdrop').classList.add('show');
+  $('#menu').setAttribute('aria-expanded', 'true');
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); return; }
+    if (e.key !== 'Tab') return;
+    const items = focusableIn($('aside'));
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  $('aside')._onKey = onKey;
+  document.addEventListener('keydown', onKey);
+  $('#navClose').focus();
+}
+// `returnFocus` is false when closing because the user picked a destination
+// (the clicked nav button should keep focus, not get overridden back to the
+// hamburger) and true for an explicit cancel — Escape, backdrop click, or
+// the drawer's own close button.
+function closeDrawer(returnFocus = true) {
+  $('aside').classList.remove('open');
+  $('#navBackdrop').classList.remove('show');
+  $('#menu').setAttribute('aria-expanded', 'false');
+  if ($('aside')._onKey) { document.removeEventListener('keydown', $('aside')._onKey); $('aside')._onKey = null; }
+  if (returnFocus && drawerReturnFocus && document.contains(drawerReturnFocus)) drawerReturnFocus.focus();
+  drawerReturnFocus = null;
+}
 // Programme-lead-only admin delete. The server independently enforces
 // programme_lead on every DELETE endpoint (role is derived from
 // PROGRAMME_LEAD_EMAILS, not anything the client sends), so this confirm
@@ -243,7 +279,7 @@ async function go(view, opts = {}) {
     b.classList.toggle('active', isActive);
     if (isActive) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
-  $('#title').textContent = titles[view]; $('aside').classList.remove('open'); $('#menu').setAttribute('aria-expanded', 'false');
+  $('#title').textContent = titles[view]; if ($('aside').classList.contains('open')) closeDrawer(false);
   if (!opts.fromHistory) { const url = new URL(location.href); if (view === 'dashboard') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.pushState(null, '', url); }
   $('#content').innerHTML = skeleton();
   try {
@@ -320,6 +356,17 @@ function bindInternSwitcher() {
   };
 }
 function bindGo() { $$('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go)); }
+// Prompt 5: toggles a table row's collapsed .mobile-secondary cells (mobile
+// only — see styles.css; on desktop .row-expand doesn't render at all, so
+// this never runs there).
+function bindRowExpand() {
+  $$('.row-expand').forEach(btn => btn.onclick = () => {
+    const tr = btn.closest('tr');
+    const expanded = tr.classList.toggle('expanded');
+    btn.setAttribute('aria-expanded', String(expanded));
+    btn.textContent = expanded ? 'Less details' : 'More details';
+  });
+}
 
 function requirementSummaryCard(req) {
   const s = req.summary;
@@ -424,7 +471,7 @@ async function interns() {
   const rows = data.map(x => {
     const s = x.requirement_summary || {};
     const attention = s.at_risk_components ? 'Target at risk' : s.watch_components ? 'Watch' : 'On track';
-    return `<tr><td><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button>${x.active === false ? ' ' + tag('Deactivated') : ''}<br>${esc(x.email)}</td><td>${esc(x.institution || '—')}</td><td>${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td>${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td>${tag(attention)}</td><td>${x.active_cases}</td><td><span class="tag ${x.identity_user_id ? 'green' : 'amber'}">${x.identity_user_id ? 'Login linked' : 'No login linked'}</span></td>${isAdmin ? `<td>${x.active === false ? `<button class="btn small" data-reactivate-intern="${x.id}" data-name="${esc(x.display_name)}" aria-label="Reactivate placement for ${esc(x.display_name)}">Reactivate</button>` : `<button class="btn small danger-btn" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}" aria-label="Deactivate placement for ${esc(x.display_name)}">Deactivate</button>`}</td>` : ''}</tr>`;
+    return `<tr><td><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button>${x.active === false ? ' ' + tag('Deactivated') : ''}<br>${esc(x.email)}</td><td class="mobile-secondary" data-label="Institution">${esc(x.institution || '—')}</td><td class="mobile-secondary" data-label="Progress">${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td class="mobile-secondary" data-label="Weeks left">${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td data-label="Status">${tag(attention)}</td><td class="mobile-secondary" data-label="Cases">${x.active_cases}</td><td class="mobile-secondary" data-label="Account"><span class="tag ${x.identity_user_id ? 'green' : 'amber'}">${x.identity_user_id ? 'Login linked' : 'No login linked'}</span></td>${isAdmin ? `<td>${x.active === false ? `<button class="btn small" data-reactivate-intern="${x.id}" data-name="${esc(x.display_name)}" aria-label="Reactivate placement for ${esc(x.display_name)}">Reactivate</button>` : `<button class="btn small danger-btn" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}" aria-label="Deactivate placement for ${esc(x.display_name)}">Deactivate</button>`}</td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
   }).join('');
   $('#content').innerHTML = `<div class="section"><div><h2>Intern placements</h2><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
     ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account', ...(isAdmin ? ['Admin'] : [])], rows)}
@@ -448,6 +495,7 @@ async function interns() {
       catch (x) { closeModal(); toast(x.message); }
     }, { confirmLabel: 'Reactivate', danger: false });
   }));
+  bindRowExpand();
 }
 async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { const created = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); setActiveIntern(created); closeModal(); toast(created.invite?.sent ? 'Placement created · invite email sent' : created.invite && !created.invite.sent ? `Placement created, but the invite email failed: ${created.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
 
@@ -470,7 +518,7 @@ async function referrals() {
   const open = data.filter(x => !String(x.status).startsWith('Closed')).length;
   const overdue = data.filter(x => x.next_action_date && x.next_action_date < today() && !String(x.status).startsWith('Closed')).length;
   const isAdmin = S.session.role === 'programme_lead';
-  const rows = data.map(x => `<tr><td><b>${esc(x.referral_code)}</b></td>${own?'':`<td>${esc(x.intern_name)}</td>`}<td>${esc(x.referral_date)}</td><td>${esc(x.referral_source||'—')}</td><td>${esc(x.site||'—')}</td><td>${esc(x.presenting_category||'—')}</td><td>${tag(x.priority)}</td><td>${tag(x.status)}</td><td>${x.contact_attempts}</td><td>${x.next_action_date?esc(x.next_action_date):'—'}</td><td>${x.update_category?tag(x.update_category):'—'}${x.last_update?`<br><small class="muted">${esc(x.last_update)}</small>`:''}</td><td><button class="btn small" data-referral-update="${x.id}" aria-label="Update referral ${esc(x.referral_code)}">Update</button>${isAdmin?` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}" aria-label="Delete referral ${esc(x.referral_code)}">Delete</button>`:''}</td></tr>`).join('');
+  const rows = data.map(x => `<tr><td><b>${esc(x.referral_code)}</b></td>${own?'':`<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Allocated">${esc(x.referral_date)}</td><td class="mobile-secondary" data-label="Source">${esc(x.referral_source||'—')}</td><td class="mobile-secondary" data-label="Site">${esc(x.site||'—')}</td><td class="mobile-secondary" data-label="Category">${esc(x.presenting_category||'—')}</td><td data-label="Priority">${tag(x.priority)}</td><td data-label="Status">${tag(x.status)}</td><td class="mobile-secondary" data-label="Attempts">${x.contact_attempts}</td><td data-label="Next action">${x.next_action_date?esc(x.next_action_date):'—'}</td><td class="mobile-secondary" data-label="Latest update">${x.update_category?tag(x.update_category):'—'}${x.last_update?`<br><small class="muted">${esc(x.last_update)}</small>`:''}</td><td><button class="btn small" data-referral-update="${x.id}" aria-label="Update referral ${esc(x.referral_code)}">Update</button>${isAdmin?` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}" aria-label="Delete referral ${esc(x.referral_code)}">Delete</button>`:''}</td><td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`).join('');
   $('#content').innerHTML = `<div class="hero"><small>De-identified workflow</small><h2>${own?'Track the referrals allocated to you.':'See what happened after each referral was allocated.'}</h2><p>Record contact progress, booking, intake and closure so referrals do not disappear from view.</p><div class="actions"><button id="addReferral" class="btn">Add referral</button></div></div>
     <div class="grid metrics">${metric('Open referrals',open)}${metric('Overdue next actions',overdue)}${metric('Total tracked',data.length)}${metric('Awaiting feedback',data.filter(x=>x.status==='Awaiting feedback').length)}</div>
     <div class="section"><div><h3>${own?'My referral list':S.intern?esc(S.intern.display_name)+' · referrals':'All intern referrals'}</h3><p>Status and a short operational update are visible to the intern and supervisor.</p></div></div>
@@ -483,6 +531,7 @@ async function referrals() {
     reason: { required: false, label: 'Reason (optional)' },
     restorePath: 'audit-restore'
   }));
+  bindRowExpand();
 }
 function referralModal(item, internsData) {
   const isEdit=!!item, own=S.session.role==='intern';
@@ -507,7 +556,7 @@ async function requirementsView() {
   const canSetOpening = S.session.role !== 'intern' && S.session.role !== 'management';
   const isAdmin = S.session.role === 'programme_lead';
   const pilot = S.session.role !== 'management' ? await api(`pilot-context?intern_id=${id}`) : null;
-  const rows = req.components.filter(x => x.calculation_mode !== 'deliverable').map(x => `<tr><td><b>${esc(x.name)}</b><br><span class="muted">${responsibilityLabel(x.responsibility)}</span></td><td>${fmt(x.completed)} / ${fmt(x.target_hours)}${x.opening_balance ? `<br><small class="muted">Opening balance: ${fmt(x.opening_balance)} h</small>` : ''}</td><td>${progressBar(x.completed, x.target_hours)}<small>${pc(x.completed, x.target_hours)}%</small></td><td>${fmt(x.remaining)}</td><td>${x.needed_per_week == null ? '—' : fmt(x.needed_per_week) + ' h/wk'}</td><td>${x.projected_completion == null ? '—' : fmt(x.projected_completion)}</td><td>${tag(x.status)}</td>${canSetOpening ? `<td><button class="btn small" data-opening="${x.id}">Opening balance</button></td>` : ''}</tr>`).join('');
+  const rows = req.components.filter(x => x.calculation_mode !== 'deliverable').map(x => `<tr><td><b>${esc(x.name)}</b><br><span class="muted">${responsibilityLabel(x.responsibility)}</span></td><td class="mobile-secondary" data-label="Completed">${fmt(x.completed)} / ${fmt(x.target_hours)}${x.opening_balance ? `<br><small class="muted">Opening balance: ${fmt(x.opening_balance)} h</small>` : ''}</td><td data-label="Progress">${progressBar(x.completed, x.target_hours)}<small>${pc(x.completed, x.target_hours)}%</small></td><td class="mobile-secondary" data-label="Remaining">${fmt(x.remaining)}</td><td class="mobile-secondary" data-label="Needed / week">${x.needed_per_week == null ? '—' : fmt(x.needed_per_week) + ' h/wk'}</td><td data-label="Projected">${x.projected_completion == null ? '—' : fmt(x.projected_completion)}</td><td data-label="Status">${tag(x.status)}</td>${canSetOpening ? `<td class="mobile-secondary" data-label="Existing hours"><button class="btn small" data-opening="${x.id}">Opening balance</button></td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`).join('');
   const deliverables = req.components.filter(x => x.calculation_mode === 'deliverable');
   $('#content').innerHTML = switcherHtml + `<div class="hero"><small>${esc(req.profile.requirement_profile_name || '')}</small><h2>${S.session.role === 'intern' ? 'Your requirement profile' : esc(req.profile.display_name) + ' · requirement profile'}</h2><p>The 720-hour programme is broken into the categories required by the intern’s institution. Campus/institution components remain visible without making the placement site responsible for producing them.</p><div class="actions"><button class="btn" data-go="hours">Log non-session activity</button><button class="btn" data-go="cases">Record counselling activity</button><button class="btn" data-go="assistant">Ask about my progress</button></div></div>
     ${requirementSummaryCard(req)}
@@ -523,6 +572,7 @@ async function requirementsView() {
   $$('[data-opening]').forEach(btn => btn.onclick = () => openingBalanceModal(req.components.find(x => x.id == btn.dataset.opening), id));
   $('#editSchedule')?.addEventListener('click', () => scheduleModal(id));
   $$('[data-del-schedule]').forEach(b => b.onclick = () => adminDelete('pilot-context', b.dataset.delSchedule, 'placement day', () => go('progress')));
+  bindRowExpand();
 }
 function openingBalanceModal(component, id) {
   modal('Existing hours · ' + component.name, `<form id="fOpening"><input type="hidden" name="intern_profile_id" value="${id}"><input type="hidden" name="component_id" value="${component.id}"><input type="hidden" name="action" value="opening_balance"><div class="field"><label>Hours already completed before Hub tracking<input name="hours" type="number" min="0" max="2000" step="0.25" value="${component.opening_balance || 0}" required></label></div><div class="field"><label>Source / note<textarea name="note">${esc(component.opening_balance_note || 'Opening balance from existing institutional logbook')}</textarea></label></div><div class="notice info">Use this once when bringing an existing intern into the Hub. It contributes to total progress but is not counted as activity in the current month.</div><button class="btn primary">Save opening balance</button></form>`);
@@ -541,7 +591,7 @@ async function cases() {
   const id = activeId(), query = id ? `cases?intern_id=${id}` : 'cases', data = await api(query);
   const canPlan = ['programme_lead', 'supervisor'].includes(S.session.role);
   const isAdmin = S.session.role === 'programme_lead';
-  const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${esc(x.site)}</td>${id ? '' : `<td>${esc(x.intern_name)}</td>`}<td>${esc(x.presenting_category || '—')}</td><td>${x.sessions}</td><td>${canPlan ? `<select data-frequency="${x.id}" aria-label="Planned frequency for case ${esc(x.case_code)}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td>${tag(x.supervision_status)}</td><td><select data-status="${x.id}" aria-label="Status for case ${esc(x.case_code)}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}" aria-label="Record counselling activity for case ${esc(x.case_code)}">Record session</button></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-case="${x.id}" data-code="${esc(x.case_code)}" data-sessions="${x.sessions}" aria-label="Delete case ${esc(x.case_code)}">Delete</button></td>` : ''}</tr>`).join('');
+  const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td data-label="Site">${esc(x.site)}</td>${id ? '' : `<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Category">${esc(x.presenting_category || '—')}</td><td data-label="Sessions">${x.sessions}</td><td class="mobile-secondary" data-label="Planned frequency">${canPlan ? `<select data-frequency="${x.id}" aria-label="Planned frequency for case ${esc(x.case_code)}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td class="mobile-secondary" data-label="Supervision">${tag(x.supervision_status)}</td><td data-label="Status"><select data-status="${x.id}" aria-label="Status for case ${esc(x.case_code)}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}" aria-label="Record counselling activity for case ${esc(x.case_code)}">Record session</button></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-case="${x.id}" data-code="${esc(x.case_code)}" data-sessions="${x.sessions}" aria-label="Delete case ${esc(x.case_code)}">Delete</button></td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`).join('');
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${S.session.role === 'intern' ? 'My cases' : id ? esc(S.intern.display_name) + ' · cases' : 'All cases'}</h2><p>De-identified workflow. Frequency feeds the caseload adequacy calculation.</p></div>${['programme_lead', 'supervisor'].includes(S.session.role) && id ? '<button id="addCase" class="btn primary">Allocate case</button>' : ''}</div>
     ${table(['Case code', 'Site', ...(id ? [] : ['Intern']), 'Category', 'Sessions', 'Planned frequency', 'Supervision', 'Status', 'Activity', ...(isAdmin ? ['Admin'] : [])], rows)}
     <div class="notice info" style="margin-top:12px">Individual counselling hours are calculated from attended session duration. Do not enter patient names, ID numbers, phone numbers, addresses or narrative clinical notes.</div>`;
@@ -557,6 +607,7 @@ async function cases() {
     });
   });
   $('#addCase')?.addEventListener('click', () => { modal('Allocate de-identified case', `<form id="fCase" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Case code<input name="case_code" placeholder="KHC-026" required></label></div><div class="field"><label>Site<select name="site" required>${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Presenting category<select name="presenting_category">${presentingCategoryOptions()}</select></label></div>${presentingCategoryOtherField()}<div class="field"><label>Planned frequency<select name="planned_frequency_weeks"><option value="1">Weekly</option><option value="2">Fortnightly</option><option value="4">Monthly</option></select></label></div><div class="full"><button class="btn primary">Allocate</button></div></form>`, 'case allocation'); bindSiteToggle($('#fCase')); bindPresentingCategoryToggle($('#fCase')); });
+  bindRowExpand();
 }
 async function saveCase(e) { if (e.target.id !== 'fCase') return; e.preventDefault(); try { await api('cases', { method: 'POST', body: JSON.stringify(resolvePresentingCategory(resolveSite(Object.fromEntries(new FormData(e.target))))) }); closeModal(); toast('Case allocated'); go('cases'); } catch (x) { toast(x.message); } }
 function activityModal(c) { modal('Record counselling activity · ' + c.case_code, `<form id="fActivity" class="formgrid"><input type="hidden" name="intern_profile_id" value="${c.intern_profile_id}"><input type="hidden" name="case_id" value="${c.id}"><div class="field"><label>Date<input name="encounter_date" type="date" value="${today()}" required></label></div><div class="field"><label>Session<select name="session_type"><option>Intake</option><option>Follow-up</option><option>Termination</option></select></label></div><div class="field"><label>Booked<select name="booked"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Attended<select name="attended"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Duration if attended (minutes)<input name="duration_minutes" type="number" min="1" max="480" value="60"></label></div><div class="field"><label>Gender for monthly statistics<select name="patient_gender"><option>Female</option><option>Male</option><option>Other</option><option>Unknown</option></select></label></div><div class="full"><button class="btn primary">Save activity</button></div></form>`); }
@@ -717,7 +768,7 @@ async function reports() {
   const trend = data.trend || [];
   const trendMonthsWithData = trend.filter(t => t.booked || t.attended || t.hours).length;
   const trendHtml = trendMonthsWithData >= 2
-    ? `<div class="tablewrap"><table><thead><tr><th>Month</th><th>Booked</th><th>Attended</th><th>Hours logged</th></tr></thead><tbody>${trend.map(t => `<tr><td>${esc(monthLabel(t.month))}</td><td>${t.booked}</td><td>${t.attended}</td><td>${fmt(t.hours)} h</td></tr>`).join('')}</tbody></table></div>`
+    ? `<div class="tablewrap"><table><thead><tr><th>Month</th><th>Booked</th><th>Attended</th><th>Hours logged</th></tr></thead><tbody>${trend.map(t => `<tr><td><b>${esc(monthLabel(t.month))}</b></td><td data-label="Booked">${t.booked}</td><td data-label="Attended">${t.attended}</td><td data-label="Hours logged">${fmt(t.hours)} h</td></tr>`).join('')}</tbody></table></div>`
     : `<p class="muted">Not enough history yet for a trend — at least two months of activity are needed.</p>`;
 
   const reviewHistoryHtml = (data.review_history || []).length
@@ -1002,7 +1053,9 @@ async function init(){
 $('#login').onsubmit=async e=>{e.preventDefault();try{const {error}=await S.supabase.auth.signInWithPassword({email:$('#email').value,password:$('#password').value});if(error)throw error;await finishLogin();}catch(x){authError(x.message);}};
 $('#setPassword').onsubmit=async e=>{e.preventDefault();const password=$('#newPassword').value;if(password!==$('#confirmPassword').value)return authError('The passwords do not match.');try{const {error}=await S.supabase.auth.updateUser({password});if(error)throw error;history.replaceState(null,'',location.pathname);location.replace('/');}catch(x){authError(x.message);}};
 $('#logout').onclick=()=>S.preview?location.reload():(S.supabase.auth.signOut().then(()=>location.reload()));
-$('#menu').onclick=()=>{const open=$('aside').classList.toggle('open');$('#menu').setAttribute('aria-expanded',String(open));};
+$('#menu').onclick=()=>{$('aside').classList.contains('open')?closeDrawer():openDrawer();};
+$('#navClose').onclick=()=>closeDrawer();
+$('#navBackdrop').onclick=()=>closeDrawer();
 $('#modalClose').onclick=closeModal; $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal();};
 $('#emergency').onclick=openEmergency; $('#emClose').onclick=closeEmergency; $('#em').onclick=e=>{if(e.target.id==='em')closeEmergency();};
 $('#quickHelp').onclick=()=>{S.assistantSeed='';go('assistant');};
