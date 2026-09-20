@@ -215,7 +215,87 @@ export async function dashboard(ctx, env) {
     open_supervision: a.open_supervision + p.open_supervision,
     at_risk: a.at_risk + (p.requirements.at_risk_components > 0 ? 1 : 0)
   }), { interns: 0, active_cases: 0, open_supervision: 0, at_risk: 0 });
-  return { profile: ctx.profile, interns, metrics };
+  const queue = await buildQueue(env, ctx, interns, supervisorId);
+  return { profile: ctx.profile, interns, metrics, queue };
+}
+
+// Prompt 6: "add an actionable dashboard queue for missing setup, overdue
+// referrals, unreviewed reports, unresolved supervision items and other
+// items requiring attention... each queue item must explain why it needs
+// attention and link directly to the relevant record." Every item here is
+// read directly off real rows (no invented/estimated data) and carries a
+// `view` + `intern_id` the client uses to jump straight to the record with
+// the right intern already selected.
+async function buildQueue(env, ctx, interns, supervisorId) {
+  const admin = getAdmin(env);
+  const items = [];
+
+  for (const p of interns) {
+    const missing = [];
+    if (!p.institution) missing.push('institution');
+    if (!p.placement_start) missing.push('placement start date');
+    if (!p.placement_end) missing.push('placement end date');
+    if (!p.identity_user_id) missing.push('login invitation');
+    if (missing.length) items.push({
+      kind: 'missing_setup', severity: 'amber',
+      title: `${p.display_name}: incomplete placement setup`,
+      reason: `Missing ${missing.join(', ')}.`,
+      view: 'interns', intern_id: p.id
+    });
+  }
+
+  let refQuery = admin.from('referrals')
+    .select('id, referral_code, status, next_action_date, intern_profile_id, profiles(display_name, supervisor_identity_user_id)')
+    .not('next_action_date', 'is', null)
+    .lt('next_action_date', new Date().toISOString().slice(0, 10))
+    .order('next_action_date', { ascending: true })
+    .limit(20);
+  if (supervisorId) refQuery = refQuery.eq('profiles.supervisor_identity_user_id', supervisorId);
+  const { data: overdueRefs, error: refErr } = await refQuery;
+  if (refErr) throw new HttpError(500, refErr.message);
+  for (const r of (overdueRefs || [])) {
+    if (String(r.status || '').startsWith('Closed')) continue;
+    const days = Math.max(0, Math.floor((Date.now() - new Date(r.next_action_date)) / 86400000));
+    items.push({
+      kind: 'overdue_referral', severity: 'red',
+      title: `Referral ${r.referral_code || '#' + r.id} overdue`,
+      reason: `Next action was due ${days} day${days === 1 ? '' : 's'} ago (${r.profiles?.display_name || 'intern'}).`,
+      view: 'referrals', intern_id: r.intern_profile_id
+    });
+  }
+
+  let repQuery = admin.from('monthly_reports')
+    .select('id, month, submitted_at, intern_profile_id, profiles(display_name, supervisor_identity_user_id)')
+    .eq('status', 'Submitted')
+    .order('month', { ascending: true })
+    .limit(20);
+  if (supervisorId) repQuery = repQuery.eq('profiles.supervisor_identity_user_id', supervisorId);
+  const { data: pendingReports, error: repErr } = await repQuery;
+  if (repErr) throw new HttpError(500, repErr.message);
+  for (const r of (pendingReports || [])) {
+    items.push({
+      kind: 'unreviewed_report', severity: 'amber',
+      title: `${r.profiles?.display_name || 'Intern'}'s ${String(r.month).slice(0, 7)} report awaiting review`,
+      reason: `Submitted${r.submitted_at ? ' ' + new Date(r.submitted_at).toLocaleDateString() : ''} and not yet reviewed.`,
+      view: 'reports', intern_id: r.intern_profile_id
+    });
+  }
+
+  const supRows = unwrap(await admin.rpc('supervision_feed', { p_supervisor_id: supervisorId }));
+  for (const row of (supRows || [])) {
+    const it = row.item || row;
+    if (it.status !== 'Open') continue;
+    items.push({
+      kind: 'open_supervision', severity: it.priority === 'Urgent' ? 'red' : 'amber',
+      title: `Supervision: ${it.topic || 'Untitled item'}${it.intern_name ? ' — ' + it.intern_name : ''}`,
+      reason: `Open supervision item${it.priority ? ' (' + it.priority + ' priority)' : ''} awaiting a response.`,
+      view: 'supervision', intern_id: it.intern_profile_id
+    });
+  }
+
+  const rank = { red: 0, amber: 1 };
+  items.sort((a, b) => (rank[a.severity] ?? 2) - (rank[b.severity] ?? 2));
+  return items.slice(0, 30);
 }
 
 export async function interns(ctx, env, url, body, method) {
