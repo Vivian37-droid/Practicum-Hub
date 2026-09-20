@@ -35,12 +35,27 @@ registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData
 
 let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '' };
 
-const NAV = {
-  programme_lead: [['dashboard', 'Dashboard'], ['interns', 'Interns'], ['referrals', 'Referral tracker'], ['progress', 'Requirements & pace'], ['cases', 'Case workflow'], ['supervision', 'Supervision'], ['competencies', 'Competencies'], ['hours', 'Activity log'], ['reports', 'Reports'], ['assistant', 'Practicum Assistant'], ['programme', 'Programme evidence'], ['handbook', 'Handbook']],
-  supervisor: [['dashboard', 'Dashboard'], ['interns', 'Assigned interns'], ['referrals', 'Referrals'], ['progress', 'Requirements & pace'], ['cases', 'Cases'], ['supervision', 'Supervision'], ['competencies', 'Competencies'], ['hours', 'Activity log'], ['reports', 'Reports'], ['assistant', 'Practicum Assistant'], ['handbook', 'Handbook']],
-  intern: [['dashboard', 'My placement'], ['referrals', 'My referrals'], ['progress', 'My requirements'], ['cases', 'My cases'], ['supervision', 'Supervision prep'], ['competencies', 'My competencies'], ['hours', 'Activity log'], ['reports', 'My report'], ['assistant', 'Practicum Assistant'], ['feedback', 'Pilot feedback'], ['handbook', 'Handbook']],
-  management: [['dashboard', 'Programme overview'], ['programme', 'Programme evidence'], ['handbook', 'Handbook']]
+// Per-role nav labels (unchanged wording from before Prompt 6) — now grouped
+// under NAV_GROUPS instead of rendered as one flat list, per Prompt 6's
+// "reorganise navigation into clearer groups" requirement. A view only
+// appears in the sidebar for a role if it has a label here, so role
+// permissions are exactly as strict as before this refactor.
+const NAV_LABELS = {
+  programme_lead: { dashboard: 'Dashboard', interns: 'Interns', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
+  supervisor: { dashboard: 'Dashboard', interns: 'Assigned interns', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
+  intern: { dashboard: 'My placement', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
+  management: { dashboard: 'Programme overview', programme: 'Programme evidence', handbook: 'Handbook' }
 };
+// Group order and membership per Prompt 6. A group is only rendered for a
+// role if at least one of its views has a label for that role.
+const NAV_GROUPS = [
+  ['Operations', ['referrals', 'cases', 'hours']],
+  ['Progress', ['progress', 'supervision', 'competencies']],
+  ['Insights', ['dashboard', 'reports', 'programme']],
+  ['Support', ['assistant', 'feedback', 'handbook']],
+  ['Administration', ['interns']]
+];
+function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
 const titles = { dashboard: 'Dashboard', interns: 'Interns', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
 
 function toast(text) { $('#toast').textContent = text; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 2200); }
@@ -86,16 +101,40 @@ function shell() {
   $('#auth').classList.add('hidden'); $('#app').classList.remove('hidden');
   $('#me').innerHTML = `<b>${esc(profile.display_name)}</b><br>${roleName(role)}`;
   $('#role').textContent = roleName(role);
-  $('#nav').innerHTML = NAV[role].map(([v, l]) => `<button class="navbtn" data-view="${v}">${l}</button>`).join('');
+  const labels = NAV_LABELS[role] || {};
+  $('#nav').innerHTML = NAV_GROUPS.map(([groupLabel, views]) => {
+    const items = views.filter(v => labels[v]);
+    if (!items.length) return '';
+    return `<div class="navgroup" role="group" aria-label="${esc(groupLabel)}"><h4>${esc(groupLabel)}</h4>${items.map(v => `<button class="navbtn" data-view="${v}">${esc(labels[v])}</button>`).join('')}</div>`;
+  }).join('');
   $$('.navbtn').forEach(b => b.onclick = () => go(b.dataset.view));
-  go('dashboard');
+  const requested = new URLSearchParams(location.search).get('view');
+  go(requested && navFlat(role).includes(requested) ? requested : 'dashboard', { fromHistory: true });
+}
+// Registered once at module load (not inside shell(), which can re-run
+// across preview-role switches) so back/forward never accumulates duplicate
+// listeners and firing go() more than once per press.
+window.addEventListener('popstate', () => { if (S.session) go(new URLSearchParams(location.search).get('view') || 'dashboard', { fromHistory: true }); });
+
+// Small skeleton placeholder shown while a view's data loads, instead of a
+// bare "Loading…" card that flashes on every navigation (Prompt 6: replace
+// repeated full-page loading messages with a stable, contained indicator).
+function skeleton(rows = 3) {
+  return `<div class="skeleton-block" aria-busy="true" aria-live="polite"><span class="sr-only">Loading…</span>${'<div class="skel-line"></div>'.repeat(rows)}</div>`;
 }
 
-async function go(view) {
+async function go(view, opts = {}) {
+  const role = S.session?.role;
+  if (role && !navFlat(role).includes(view)) { toast('That section is not available for your role.'); view = 'dashboard'; }
   S.view = view;
-  $$('.navbtn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  $$('.navbtn').forEach(b => {
+    const isActive = b.dataset.view === view;
+    b.classList.toggle('active', isActive);
+    if (isActive) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
   $('#title').textContent = titles[view]; $('aside').classList.remove('open');
-  $('#content').innerHTML = '<div class="card">Loading…</div>';
+  if (!opts.fromHistory) { const url = new URL(location.href); if (view === 'dashboard') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.pushState(null, '', url); }
+  $('#content').innerHTML = skeleton();
   try {
     if (view === 'dashboard') await dashboard();
     else if (view === 'interns') await interns();
@@ -236,10 +275,36 @@ async function dashboard() {
     return `<tr class="click" data-id="${x.id}"><td><b>${esc(x.display_name)}</b><br><span class="muted">${esc(x.institution || 'Institution not set')}</span></td><td>${fmt(s.total_completed)} / ${fmt(s.total_target)}</td><td>${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td>${s.clinical_hours_needed_per_week == null ? '—' : fmt(s.clinical_hours_needed_per_week) + ' h/wk'}</td><td>${s.active_cases}</td><td>${tag(attention)}</td><td>${x.open_supervision}</td></tr>`;
   }).join('');
   $('#content').innerHTML = `<div class="hero"><h1>Supervise the programme before problems become end-of-placement crises.</h1><p>The dashboard now separates institutional requirements, calculates weekly pace, and flags when the current clinical allocation may be insufficient.</p><div class="actions"><button class="btn" data-go="interns">Manage interns</button><button class="btn" data-go="assistant">Open Practicum Assistant</button></div></div>
+    ${queueCard(d.queue || [], d.interns || [])}
     <div class="grid metrics">${metric('Active interns', m.interns)}${metric('Interns with target risk', m.at_risk)}${metric('Active cases', m.active_cases)}${metric('Open supervision', m.open_supervision)}</div>
     <div class="section"><div><h3>Placement pace</h3><p>Click an intern to open their requirement profile.</p></div></div>${table(['Intern', 'Formal hours', 'Weeks left', 'Clinical pace needed', 'Cases', 'Requirements', 'Supervision'], rows)}`;
   $$('[data-id]').forEach(row => row.onclick = () => { setActiveIntern(d.interns.find(i => i.id == row.dataset.id)); go('progress'); });
+  bindQueue(d.queue || [], d.interns || []);
   bindGo();
+}
+
+// Prompt 6: an actionable queue of items that need attention — each one
+// names what is wrong and links straight to the record, rather than a bare
+// metric with no next action. Built server-side in dashboard() from real
+// setup gaps, overdue referrals, unreviewed reports and open supervision
+// items (see buildQueue in functions/api/_handlers.js) — nothing here is
+// invented client-side.
+function queueCard(items, interns) {
+  if (!items.length) return `<div class="card" style="margin-top:14px"><h3>Needs attention</h3><p class="queue-empty">Nothing outstanding right now.</p></div>`;
+  const rows = items.map((it, i) => `<div class="queue-item sev-${esc(it.severity || '')}" data-queue-index="${i}" role="button" tabindex="0"><div class="queue-text"><b>${esc(it.title)}</b><span>${esc(it.reason)}</span></div><span class="btn small" aria-hidden="true">Review</span></div>`).join('');
+  return `<div class="card" style="margin-top:14px"><h3>Needs attention (${items.length})</h3><div class="queue">${rows}</div></div>`;
+}
+function bindQueue(items, interns) {
+  $$('[data-queue-index]').forEach(el => {
+    const openItem = () => {
+      const it = items[Number(el.dataset.queueIndex)];
+      if (!it) return;
+      if (it.intern_id) { const person = interns.find(i => i.id === it.intern_id); if (person) setActiveIntern(person); }
+      go(it.view || 'dashboard');
+    };
+    el.onclick = openItem;
+    el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openItem(); } };
+  });
 }
 
 async function interns() {
@@ -601,7 +666,7 @@ async function demoApi(path, options = {}) {
   throw Error('Preview route not implemented');
 }
 function demoProgramme(d){const atRiskInterns=demoRequirement(11).summary.at_risk_components>0?1:0;return{metrics:{interns:1,cases:0,active_cases:0,hours:470.5,at_risk_interns:atRiskInterns,open_supervision:0,reviewed_reports:0,booked:0,attended:0,attendance_rate:null,median_days_to_intake:null},sites:[],institutions:[{institution:'SACAP',count:1}]};}
-async function preview(role){S.preview=true;S.data=demo();const profile=role==='intern'?{id:11,display_name:'Erin George'}:{id:1,display_name:role==='management'?'Programme Viewer':'Vivian Leibrandt'};S.session={profile,role};restoreActiveIntern();shell();const requested=new URLSearchParams(location.search).get('view');if(requested&&titles[requested])setTimeout(()=>go(requested),0);}
+async function preview(role){S.preview=true;S.data=demo();const profile=role==='intern'?{id:11,display_name:'Erin George'}:{id:1,display_name:role==='management'?'Programme Viewer':'Vivian Leibrandt'};S.session={profile,role};restoreActiveIntern();shell();}
 let pendingAuthType=null;
 function authError(message){$('#authErr').classList.remove('hidden');$('#authErr').textContent=message;}
 function showPasswordSetup(type){pendingAuthType=type;$('#login').classList.add('hidden');$('#setPassword').classList.remove('hidden');$('#setPasswordMessage').innerHTML=type==='recovery'?'<b>Choose a new password</b><br>Enter and confirm your new password.':'<b>Finish setting up your account</b><br>Create a password to accept your invitation.';}
