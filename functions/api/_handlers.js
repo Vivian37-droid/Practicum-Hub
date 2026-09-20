@@ -301,31 +301,41 @@ async function buildQueue(env, ctx, interns, supervisorId) {
 export async function interns(ctx, env, url, body, method) {
   requireRole(ctx, ['programme_lead', 'supervisor']);
   const admin = getAdmin(env);
-  // Admin-only hard delete (Vivian's explicit request). Restricted to
-  // programme_lead — supervisors and interns never get this, since role is
-  // derived server-side from PROGRAMME_LEAD_EMAILS and can't be spoofed by
-  // the client. Cascades (profiles.id ON DELETE CASCADE) remove all of the
-  // intern's cases, encounters, hours, supervision items, opening balances,
-  // competency progress, reports, referrals and schedule/planned items;
-  // audit_log rows are preserved (ON DELETE SET NULL). If the intern had
-  // accepted their invite, their Supabase Auth account is removed too so a
-  // deleted test intern can't still sign in.
+  // Prompt 4: removing an intern used to hard-delete `profiles` (cascading
+  // away every case/hours/supervision/report/referral row) and the linked
+  // Supabase Auth account — irreversible, and it destroyed exactly the
+  // hour-tracking history this app exists to keep. Deactivating instead
+  // (profiles.active = false, a column/flag list_interns_with_counts,
+  // upsert_intern and programme_metrics already respect) removes the intern
+  // from active rosters and blocks their login (see the active-check in
+  // context()) while preserving every historical record intact and
+  // reversible via the PATCH reactivate branch below.
   if (method === 'DELETE') {
     requireRole(ctx, ['programme_lead']);
     const internId = Number(url.searchParams.get('id') || body.id || 0);
     if (!internId) throw new HttpError(400, 'Intern id is required');
-    const { data: row, error } = await admin.from('profiles').select('id, display_name, email, identity_user_id').eq('id', internId).maybeSingle();
+    const { data: row, error } = await admin.from('profiles').select('id, display_name, email, active').eq('id', internId).maybeSingle();
     if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Intern not found');
-    await audit(ctx, env, 'delete', 'intern', internId, { display_name: row.display_name, email: row.email }, internId);
-    const { error: delErr } = await admin.from('profiles').delete().eq('id', internId);
-    if (delErr) throw new HttpError(500, delErr.message);
-    let authDeleted = false;
-    if (row.identity_user_id) {
-      try { await admin.auth.admin.deleteUser(row.identity_user_id); authDeleted = true; }
-      catch (e) { console.error('Failed to delete linked auth account', e); }
-    }
-    return { ok: true, deleted_id: internId, auth_deleted: authDeleted };
+    if (row.active === false) throw new HttpError(400, 'This placement is already deactivated');
+    const reason = limited(body.reason, 500, 'Reason', true);
+    const { error: updErr } = await admin.from('profiles').update({ active: false }).eq('id', internId);
+    if (updErr) throw new HttpError(500, updErr.message);
+    await audit(ctx, env, 'deactivate', 'intern', internId, { display_name: row.display_name, email: row.email }, internId, reason);
+    return { ok: true, deactivated_id: internId };
+  }
+  if (method === 'PATCH' && body.action === 'reactivate') {
+    requireRole(ctx, ['programme_lead']);
+    const internId = Number(body.id || 0);
+    if (!internId) throw new HttpError(400, 'Intern id is required');
+    const { data: row, error } = await admin.from('profiles').select('id, display_name, active').eq('id', internId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Intern not found');
+    if (row.active !== false) throw new HttpError(400, 'This placement is already active');
+    const { error: updErr } = await admin.from('profiles').update({ active: true }).eq('id', internId);
+    if (updErr) throw new HttpError(500, updErr.message);
+    await audit(ctx, env, 'reactivate', 'intern', internId, { display_name: row.display_name }, internId);
+    return { ok: true, reactivated_id: internId };
   }
   if (method === 'GET') {
     const supervisorId = ctx.role === 'supervisor' ? ctx.user.id : null;
@@ -425,7 +435,12 @@ export async function cases(ctx, env, url, body, method) {
     const { data: row, error } = await admin.from('cases').select('*').eq('id', caseId).maybeSingle();
     if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Case not found');
-    await audit(ctx, env, 'delete', 'case', caseId, { case_code: row.case_code }, row.intern_profile_id);
+    // A case's encounters cascade-delete with it (encounters.case_id ON
+    // DELETE CASCADE) — unlike referrals/supervision/pilot_feedback, that
+    // child data can't be snapshotted back by restoreAudit(), so this stays
+    // a real, unrecoverable deletion and always requires a reason.
+    const reason = limited(body.reason, 500, 'Reason', true);
+    await audit(ctx, env, 'delete', 'case', caseId, { case_code: row.case_code, sessions: row.sessions }, row.intern_profile_id, reason);
     const { error: delErr } = await admin.from('cases').delete().eq('id', caseId);
     if (delErr) throw new HttpError(500, delErr.message);
     return { ok: true, deleted_id: caseId };
@@ -498,7 +513,8 @@ export async function encounters(ctx, env, url, body, method) {
     const { data: row, error } = await admin.from('encounters').select('*').eq('id', encId).maybeSingle();
     if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Encounter not found');
-    await audit(ctx, env, 'delete', 'encounter', encId, null, row.intern_profile_id);
+    const reason = limited(body.reason, 500, 'Reason');
+    await audit(ctx, env, 'delete', 'encounter', encId, { ...row }, row.intern_profile_id, reason);
     const { error: delErr } = await admin.from('encounters').delete().eq('id', encId);
     if (delErr) throw new HttpError(500, delErr.message);
     return { ok: true, deleted_id: encId };
@@ -547,10 +563,45 @@ export async function hoursView(ctx, env, url, body, method) {
     const { data: row, error } = await admin.from('hours').select('*').eq('id', hoursId).maybeSingle();
     if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Hours entry not found');
-    await audit(ctx, env, 'delete', 'hours', hoursId, { component_code: row.component_code, hours: row.hours }, row.intern_profile_id);
+    // Prompt 4: "a correction workflow for logged hours rather than silent
+    // destructive deletion" — the PATCH branch below is the primary path for
+    // fixing a wrong entry now. Delete remains for genuine duplicates/
+    // wrong-intern entries, and always requires a reason since it destroys
+    // logged clinical-hour evidence outright.
+    const reason = limited(body.reason, 500, 'Reason', true);
+    await audit(ctx, env, 'delete', 'hours', hoursId, { ...row }, row.intern_profile_id, reason);
     const { error: delErr } = await admin.from('hours').delete().eq('id', hoursId);
     if (delErr) throw new HttpError(500, delErr.message);
     return { ok: true, deleted_id: hoursId };
+  }
+  if (method === 'PATCH') {
+    requireRole(ctx, ['programme_lead']);
+    const hoursId = Number(body.id || 0);
+    if (!hoursId) throw new HttpError(400, 'Hours entry id is required');
+    const { data: row, error } = await admin.from('hours').select('*').eq('id', hoursId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Hours entry not found');
+    const reason = limited(body.reason, 500, 'Correction reason', true);
+    const value = body.hours == null ? row.hours : num(body.hours);
+    if (!(value > 0 && value <= 24)) throw new HttpError(400, 'Hours must be greater than 0 and no more than 24');
+    const workDate = body.work_date ? dateValue(body.work_date, 'Work date') : row.work_date;
+    let componentCode = row.component_code, category = row.category;
+    if (body.component_code && body.component_code !== row.component_code) {
+      const { data: profileRow, error: profErr } = await admin.from('profiles').select('requirement_profile_id').eq('id', row.intern_profile_id).maybeSingle();
+      if (profErr) throw new HttpError(500, profErr.message);
+      const { data: component, error: compErr } = await admin.from('requirement_components').select('*')
+        .eq('requirement_profile_id', profileRow?.requirement_profile_id ?? -1)
+        .eq('code', body.component_code).maybeSingle();
+      if (compErr) throw new HttpError(500, compErr.message);
+      if (!component || !['manual', 'manual_plus_individual_encounters'].includes(component.calculation_mode)) throw new HttpError(400, 'Choose a valid activity category');
+      componentCode = component.code; category = component.name;
+    }
+    const note = body.note == null ? row.note : limited(body.note, 1000, 'Note');
+    const updated = unwrap(await admin.from('hours').update({
+      work_date: workDate, hours: value, component_code: componentCode, category, note
+    }).eq('id', hoursId).select().single());
+    await audit(ctx, env, 'correct', 'hours', hoursId, { before: row, after: updated }, row.intern_profile_id, reason);
+    return updated;
   }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
@@ -608,10 +659,11 @@ export async function supervision(ctx, env, url, body, method) {
     const { data: row, error } = await admin.from('supervision_items').select('*').eq('id', supId).maybeSingle();
     if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Supervision item not found');
-    await audit(ctx, env, 'delete', 'supervision', supId, { topic: row.topic }, row.intern_profile_id);
+    const reason = limited(body.reason, 500, 'Reason');
+    const auditId = await audit(ctx, env, 'delete', 'supervision', supId, { ...row }, row.intern_profile_id, reason);
     const { error: delErr } = await admin.from('supervision_items').delete().eq('id', supId);
     if (delErr) throw new HttpError(500, delErr.message);
-    return { ok: true, deleted_id: supId };
+    return { ok: true, deleted_id: supId, audit_id: auditId };
   }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   if (method === 'PATCH') {
@@ -626,6 +678,7 @@ export async function supervision(ctx, env, url, body, method) {
     const updated = unwrap(await admin.from('supervision_items').update({
       supervisor_note: note, status, updated_at: new Date().toISOString()
     }).eq('id', row.id).select().single());
+    await audit(ctx, env, 'review', 'supervision', row.id, { status }, row.intern_profile_id);
     return updated;
   }
   await assertInternAccess(ctx, id, env);
@@ -743,6 +796,14 @@ export async function reports(ctx, env, url, body, method) {
   // Reviewer identity is taken from the authenticated session, never from
   // client-supplied input, so "reviewed by" on a report can't be spoofed.
   const reviewedByName = status === 'Reviewed' ? (ctx.profile.display_name || ctx.profile.email || null) : null;
+  // Prompt 4: "makes the resulting state unambiguous" — find out up front
+  // whether this is a first review or a re-click/second reviewer, since
+  // upsert_monthly_report (0007) now only sets reviewed_at/reviewed_by_name
+  // once. already_reviewed lets the client say "already reviewed by X —
+  // comment updated" instead of implying the review was just re-stamped.
+  const { data: existing, error: existingErr } = await admin.from('monthly_reports').select('status').eq('intern_profile_id', id).eq('month', month).maybeSingle();
+  if (existingErr) throw new HttpError(500, existingErr.message);
+  const alreadyReviewed = status === 'Reviewed' && existing?.status === 'Reviewed';
   const row = unwrap(await admin.rpc('upsert_monthly_report', {
     p_intern_id: id,
     p_month: month,
@@ -751,8 +812,8 @@ export async function reports(ctx, env, url, body, method) {
     p_supervisor_comment: supervisorComment,
     p_reviewed_by_name: reviewedByName
   }));
-  await audit(ctx, env, status === 'Reviewed' ? 'review' : 'submit', 'monthly_report', row.id, { month, status }, id);
-  return row;
+  await audit(ctx, env, status === 'Reviewed' ? 'review' : 'submit', 'monthly_report', row.id, { month, status, already_reviewed: alreadyReviewed }, id);
+  return { ...row, already_reviewed: alreadyReviewed };
 }
 
 export async function referrals(ctx, env, url, body, method) {
@@ -764,10 +825,11 @@ export async function referrals(ctx, env, url, body, method) {
     const { data: row, error } = await admin.from('referrals').select('*').eq('id', refId).maybeSingle();
     if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Referral not found');
-    await audit(ctx, env, 'delete', 'referral', refId, { referral_code: row.referral_code }, row.intern_profile_id);
+    const reason = limited(body.reason, 500, 'Reason');
+    const auditId = await audit(ctx, env, 'delete', 'referral', refId, { ...row }, row.intern_profile_id, reason);
     const { error: delErr } = await admin.from('referrals').delete().eq('id', refId);
     if (delErr) throw new HttpError(500, delErr.message);
-    return { ok: true, deleted_id: refId };
+    return { ok: true, deleted_id: refId, audit_id: auditId };
   }
   const requestedId = Number(url.searchParams.get('intern_id') || body.intern_profile_id || 0);
   const id = ctx.role === 'intern' ? ctx.profile.id : requestedId;
@@ -893,10 +955,11 @@ export async function feedback(ctx, env, url, body, method) {
     const { data: row, error } = await admin.from('pilot_feedback').select('*').eq('id', fbId).maybeSingle();
     if (error) throw new HttpError(500, error.message);
     if (!row) throw new HttpError(404, 'Feedback not found');
-    await audit(ctx, env, 'delete', 'pilot_feedback', fbId, { type: row.feedback_type }, row.intern_profile_id);
+    const reason = limited(body.reason, 500, 'Reason');
+    const auditId = await audit(ctx, env, 'delete', 'pilot_feedback', fbId, { ...row }, row.intern_profile_id, reason);
     const { error: delErr } = await admin.from('pilot_feedback').delete().eq('id', fbId);
     if (delErr) throw new HttpError(500, delErr.message);
-    return { ok: true, deleted_id: fbId };
+    return { ok: true, deleted_id: fbId, audit_id: auditId };
   }
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
@@ -916,6 +979,41 @@ export async function feedback(ctx, env, url, body, method) {
     return row;
   }
   throw new HttpError(405, 'Method not allowed');
+}
+
+// Prompt 4: "an undo or soft-delete approach where practical." Referrals,
+// supervision items and pilot feedback have no child rows that cascade away
+// on delete (unlike cases→encounters), so their full pre-delete row is
+// captured in the audit_log entry above and can be re-inserted verbatim
+// here — a genuine undo, not just a soft-delete flag. Intern removal uses
+// its own reactivate PATCH above (soft-delete via profiles.active); case/
+// hours/encounter deletes are not restorable this way (case deletion
+// cascades away encounters; hours/encounters keep only a snapshot for audit
+// context, since restoring them post-hoc into pace/hour totals a supervisor
+// may have already acted on would be more confusing than helpful).
+const RESTORABLE_TABLES = { referral: 'referrals', supervision: 'supervision_items', pilot_feedback: 'pilot_feedback' };
+
+export async function restoreAudit(ctx, env, url, body, method) {
+  requireMethod(method, ['POST']);
+  requireRole(ctx, ['programme_lead']);
+  const admin = getAdmin(env);
+  const auditId = Number(body.audit_id || 0);
+  if (!auditId) throw new HttpError(400, 'audit_id is required');
+  const { data: logRow, error } = await admin.from('audit_log').select('*').eq('id', auditId).maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  if (!logRow) throw new HttpError(404, 'Audit record not found');
+  if (logRow.action !== 'delete') throw new HttpError(400, 'Only a deletion can be restored');
+  if (logRow.restored_at) throw new HttpError(409, 'This record has already been restored');
+  const table = RESTORABLE_TABLES[logRow.entity_type];
+  if (!table) throw new HttpError(400, 'This record type cannot be restored');
+  const snapshot = logRow.detail ? JSON.parse(logRow.detail) : null;
+  if (!snapshot || snapshot.id == null) throw new HttpError(400, 'No restorable snapshot was recorded for this deletion');
+  const { id: _oldId, ...fields } = snapshot;
+  const restored = unwrap(await admin.from(table).insert(fields).select().single());
+  const { error: markErr } = await admin.from('audit_log').update({ restored_at: new Date().toISOString() }).eq('id', auditId);
+  if (markErr) throw new HttpError(500, markErr.message);
+  await audit(ctx, env, 'restore', logRow.entity_type, restored.id, { restored_from_audit_id: auditId }, logRow.profile_id);
+  return restored;
 }
 
 export async function programme(ctx, env) {
