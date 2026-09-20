@@ -36,6 +36,7 @@ document.addEventListener('submit', (e) => {
   Promise.resolve(fn(e)).finally(() => buttons.forEach(b => { b.disabled = false; if (b.dataset.origText != null) b.textContent = b.dataset.origText; }));
 });
 registerForm('fIntern', e => saveIntern(e));
+registerForm('fPurgeIntern', e => purgeIntern(e));
 registerForm('fReferral', e => saveReferral(e));
 registerForm('fOpening', e => saveOpeningBalance(e));
 registerForm('fCase', e => saveCase(e));
@@ -480,7 +481,7 @@ async function interns() {
     // solid red button — Prompt 8: "make destructive administration less
     // visually prominent." The confirmation dialog (adminDelete/confirmModal)
     // still shows a proper danger-styled button before anything happens.
-    return `<tr><td><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button>${x.active === false ? ' ' + tag('Deactivated') : ''}<br>${esc(x.email)}</td><td class="mobile-secondary" data-label="Institution">${esc(x.institution || '—')}</td><td class="mobile-secondary" data-label="Progress">${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td class="mobile-secondary" data-label="Weeks left">${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td data-label="Status">${tag(attention)}</td><td class="mobile-secondary" data-label="Cases">${x.active_cases}</td><td class="mobile-secondary" data-label="Account">${accountCell}</td>${isAdmin ? `<td>${x.active === false ? `<button class="btn small" data-reactivate-intern="${x.id}" data-name="${esc(x.display_name)}" aria-label="Reactivate placement for ${esc(x.display_name)}">Reactivate</button>` : `<button class="btn-subtle" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}" aria-label="Deactivate placement for ${esc(x.display_name)}">Deactivate</button>`}</td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
+    return `<tr><td><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button>${x.active === false ? ' ' + tag('Deactivated') : ''}<br>${esc(x.email)}</td><td class="mobile-secondary" data-label="Institution">${esc(x.institution || '—')}</td><td class="mobile-secondary" data-label="Progress">${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td class="mobile-secondary" data-label="Weeks left">${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td data-label="Status">${tag(attention)}</td><td class="mobile-secondary" data-label="Cases">${x.active_cases}</td><td class="mobile-secondary" data-label="Account">${accountCell}</td>${isAdmin ? `<td>${x.active === false ? `<button class="btn small" data-reactivate-intern="${x.id}" data-name="${esc(x.display_name)}" aria-label="Reactivate placement for ${esc(x.display_name)}">Reactivate</button> <button class="btn small danger-btn" data-purge-intern="${x.id}" data-name="${esc(x.display_name)}" data-email="${esc(x.email)}" aria-label="Permanently delete test placement for ${esc(x.display_name)}">Delete test record</button>` : `<button class="btn-subtle" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}" aria-label="Deactivate placement for ${esc(x.display_name)}">Deactivate</button>`}</td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
   }).join('');
   $('#content').innerHTML = `<div class="section"><div><h2>Intern placements</h2><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
     ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account', ...(isAdmin ? ['Admin'] : [])], rows)}
@@ -511,9 +512,14 @@ async function interns() {
       catch (x) { closeModal(); toast(x.message); }
     }, { confirmLabel: 'Reactivate', danger: false });
   }));
+  $$('[data-purge-intern]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    modal(`Permanently delete ${esc(b.dataset.name)}?`, `<form id="fPurgeIntern"><input type="hidden" name="id" value="${b.dataset.purgeIntern}"><input type="hidden" name="action" value="purge_test_intern"><p>This is only for a test placement. It permanently removes the sign-in account and all linked hours, referrals, cases, supervision, competencies and reports. It cannot be undone.</p><div class="field"><label>Reason<textarea name="reason" required></textarea></label></div><div class="field"><label>Type ${esc(b.dataset.email)} to confirm<input name="confirm_email" type="email" required autocomplete="off"></label></div><button class="btn danger-btn">Permanently delete test record</button></form>`);
+  }));
   bindRowExpand();
 }
 async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { const created = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); setActiveIntern(created); closeModal(); toast(created.invite?.sent ? 'Placement created · invite email sent' : created.invite && !created.invite.sent ? `Placement created, but the invite email failed: ${created.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
+async function purgeIntern(e) { if (e.target.id !== 'fPurgeIntern') return; e.preventDefault(); try { await api('interns', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); clearActiveIntern(); closeModal(); toast('Test intern and linked records permanently deleted'); go('interns'); } catch (x) { toast(x.message); } }
 
 const REFERRAL_STATUSES = ['Allocated','Contact attempted','Contact made','Booked','Intake completed','Active','Awaiting feedback','Closed – completed','Closed – no contact','Reallocated'];
 const SITES = ['Stellenbosch Hospital','Stellenbosch Hospital OPD','Cloetesville CDC','Groendal Clinic','Khayamandi Clinic','Klapmuts Clinic','Idas Valley Clinic','Don & Pat Clinic','Jamestown Clinic','Night Shelter','SACAP campus','Cornerstone campus'];
@@ -568,7 +574,8 @@ async function referrals() {
     const nextActionCell = x.next_action_date
       ? `${esc(x.next_action_date)}${daysOverdue > 0 ? `<br><span class="tag red">${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue</span>` : ''}`
       : '—';
-    return `<tr><td><b>${esc(x.referral_code)}</b></td>${own ? '' : `<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Allocated">${esc(x.referral_date)}</td><td class="mobile-secondary" data-label="Source">${esc(x.referral_source || '—')}</td><td class="mobile-secondary" data-label="Site">${esc(x.site || '—')}</td><td class="mobile-secondary" data-label="Category">${esc(x.presenting_category || '—')}</td><td data-label="Priority">${tag(x.priority)}</td><td data-label="Status">${tag(x.status)}</td><td class="mobile-secondary" data-label="Attempts">${x.contact_attempts}</td><td data-label="Next action">${nextActionCell}</td><td data-label="Next required action"><small>${esc(referralNextAction(x))}</small></td><td class="mobile-secondary" data-label="Latest update">${x.update_category ? tag(x.update_category) : '—'}${x.last_update ? `<br><small class="muted">${esc(x.last_update)}</small>` : ''}</td><td><button class="btn small" data-referral-update="${x.id}" aria-label="Update referral ${esc(x.referral_code)}">Update</button>${isAdmin ? ` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}" aria-label="Delete referral ${esc(x.referral_code)}">Delete</button>` : ''}</td><td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
+    const accepted = x.accepted_at ? `${tag('Accepted')}<br><small class="muted">${esc(new Date(x.accepted_at).toLocaleDateString())}</small>` : (own ? `<button class="btn small primary" data-accept-referral="${x.id}">Accept</button>` : tag('Awaiting acceptance'));
+    return `<tr><td><b>${esc(x.referral_code)}</b></td>${own ? '' : `<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Allocated">${esc(x.referral_date)}</td><td data-label="Acknowledged">${accepted}</td><td class="mobile-secondary" data-label="Source">${esc(x.referral_source || '—')}</td><td class="mobile-secondary" data-label="Site">${esc(x.site || '—')}</td><td class="mobile-secondary" data-label="Category">${esc(x.presenting_category || '—')}</td><td data-label="Priority">${tag(x.priority)}</td><td data-label="Status">${tag(x.status)}</td><td class="mobile-secondary" data-label="Attempts">${x.contact_attempts}</td><td data-label="Next action">${nextActionCell}</td><td data-label="Next required action"><small>${esc(referralNextAction(x))}</small></td><td class="mobile-secondary" data-label="Latest update">${x.update_category ? tag(x.update_category) : '—'}${x.last_update ? `<br><small class="muted">${esc(x.last_update)}</small>` : ''}</td><td><button class="btn small" data-referral-update="${x.id}" aria-label="Update referral ${esc(x.referral_code)}">Update</button>${isAdmin ? ` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}" aria-label="Delete referral ${esc(x.referral_code)}">Delete</button>` : ''}</td><td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
   };
 
   const draw = () => {
@@ -584,7 +591,8 @@ async function referrals() {
       return true;
     });
     filtered.sort(REFERRAL_SORTS[filters.sort].cmp);
-    $('#refTableWrap').innerHTML = table(['Code', ...(own ? [] : ['Intern']), 'Allocated', 'Source', 'Site', 'Category', 'Priority', 'Status', 'Attempts', 'Next action', 'Next required action', 'Latest update', ''], filtered.map(rowHtml).join(''), data.length ? 'No referrals match these filters.' : 'No referrals have been added yet.');
+    $('#refTableWrap').innerHTML = table(['Code', ...(own ? [] : ['Intern']), 'Allocated', 'Acknowledged', 'Source', 'Site', 'Category', 'Priority', 'Status', 'Attempts', 'Next action', 'Next required action', 'Latest update', ''], filtered.map(rowHtml).join(''), data.length ? 'No referrals match these filters.' : 'No referrals have been added yet.');
+    $$('[data-accept-referral]').forEach(b => b.onclick = async () => { try { await api('referrals', { method: 'PATCH', body: JSON.stringify({ id: b.dataset.acceptReferral, action: 'accept' }) }); toast('Referral accepted'); go('referrals'); } catch (x) { toast(x.message); } });
     $$('[data-referral-update]').forEach(b => b.onclick = () => referralModal(data.find(x => x.id == b.dataset.referralUpdate), internsData));
     $$('[data-del-referral]').forEach(b => b.onclick = () => adminDelete('referrals', b.dataset.delReferral, `referral ${b.dataset.code}`, () => go('referrals'), {
       message: `This permanently deletes referral ${esc(b.dataset.code)} unless undone. It can be restored from the confirmation toast right after deleting.`,
@@ -785,30 +793,30 @@ async function hours() {
   const isAdmin = S.session.role === 'programme_lead';
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>Activity log</h2><p>Log non-individual counselling activities directly against the institution’s formal categories.</p></div><button id="logHours" class="btn primary">Log activity hours</button></div>
     <div class="grid two"><div class="notice info"><b>Individual counselling is automatic.</b><br>Attended case sessions and their duration feed the counselling requirement. Do not log those hours again here.</div><div class="card"><b>${esc(req.profile.requirement_profile_name || '')}</b><p class="muted">${fmt(req.summary.total_completed)} of ${fmt(req.summary.total_target)} formal hours currently recorded.</p>${progressBar(req.summary.total_completed, req.summary.total_target)}</div></div>
-    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b>${x.correction_history?.length ? ` <span class="tag amber">Corrected ×${x.correction_history.length}</span>` : ''}<br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small>${x.correction_history?.length ? `<details><summary>Correction history</summary><div class="list" style="margin-top:6px">${x.correction_history.map(h => `<div class="row"><div class="grow"><small>${esc(h.reason || 'No reason recorded')}${h.before && h.after ? ` — ${fmt(h.before.hours)} h → ${fmt(h.after.hours)} h` : ''}</small></div><small class="muted">${esc(new Date(h.created_at).toLocaleDateString())}</small></div>`).join('')}</div></details>` : ''}</div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small" data-edit-hours="${x.id}" aria-label="Edit activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Edit</button> <button class="btn small danger-btn" data-del-hours="${x.id}" aria-label="Delete activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
+    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b>${x.correction_history?.length ? ` <span class="tag amber">Corrected ×${x.correction_history.length}</span>` : ''}<br><small class="muted">${esc(x.work_date)} · ${esc(x.service_type || 'Legacy activity type not recorded')} · ${esc(x.site || 'Facility not recorded')}${x.note ? ' · ' + esc(x.note) : ''}</small>${x.correction_history?.length ? `<details><summary>Correction history</summary><div class="list" style="margin-top:6px">${x.correction_history.map(h => `<div class="row"><div class="grow"><small>${esc(h.reason || 'No reason recorded')}${h.before && h.after ? ` — ${fmt(h.before.hours)} h → ${fmt(h.after.hours)} h` : ''}</small></div><small class="muted">${esc(new Date(h.created_at).toLocaleDateString())}</small></div>`).join('')}</div></details>` : ''}</div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small" data-edit-hours="${x.id}" aria-label="Edit activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Edit</button> <button class="btn small danger-btn" data-del-hours="${x.id}" aria-label="Delete activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
   bindInternSwitcher();
-  $('#logHours').onclick = () => modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`);
+  $('#logHours').onclick = () => { modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Activity type<select name="service_type" required><option>Other activity</option><option>Group counselling</option><option>Family counselling</option></select></label></div><div class="field"><label>Facility<select name="site" required>${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`); bindSiteToggle($('#fHours')); };
   // Prompt 4: "a correction workflow for logged hours rather than silent
   // destructive deletion" — Edit updates the entry in place (with a
   // mandatory reason, audited as a before/after pair) instead of requiring
   // programme_lead to delete and re-create it.
   $$('[data-edit-hours]').forEach(b => b.onclick = () => {
     const x = data.entries.find(e => e.id == b.dataset.editHours);
-    modal('Correct activity entry', `<form id="fHoursEdit" class="formgrid"><input type="hidden" name="id" value="${x.id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${data.components.map(c => `<option value="${esc(c.code)}" ${c.code === x.component_code ? 'selected' : ''}>${esc(c.manual_label || c.name)}</option>`).join('')}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${esc(x.work_date)}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" value="${x.hours}" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information">${esc(x.note || '')}</textarea></label></div><div class="full field"><label>Reason for this correction<textarea name="reason" required placeholder="e.g. wrong category selected, date entered incorrectly"></textarea></label></div><div class="full"><button class="btn primary">Save correction</button></div></form>`);
+    modal('Correct activity entry', `<form id="fHoursEdit" class="formgrid"><input type="hidden" name="id" value="${x.id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${data.components.map(c => `<option value="${esc(c.code)}" ${c.code === x.component_code ? 'selected' : ''}>${esc(c.manual_label || c.name)}</option>`).join('')}</select></label></div><div class="field"><label>Activity type<select name="service_type" required>${['Other activity','Group counselling','Family counselling'].map(t => `<option ${t === (x.service_type || 'Other activity') ? 'selected' : ''}>${t}</option>`).join('')}</select></label></div><div class="field"><label>Facility<select name="site" required>${siteOptions(x.site || '')}</select></label></div>${siteOtherField(x.site || '')}<div class="field"><label>Date<input name="work_date" type="date" value="${esc(x.work_date)}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" value="${x.hours}" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information">${esc(x.note || '')}</textarea></label></div><div class="full field"><label>Reason for this correction<textarea name="reason" required placeholder="e.g. wrong category selected, date entered incorrectly"></textarea></label></div><div class="full"><button class="btn primary">Save correction</button></div></form>`); bindSiteToggle($('#fHoursEdit'));
   });
   $$('[data-del-hours]').forEach(b => b.onclick = () => adminDelete('hours', b.dataset.delHours, 'activity entry', () => go('hours'), {
     message: 'This permanently deletes this logged activity entry. This cannot be undone — for a wrong category, date or hours value, use Edit instead.',
     reason: { required: true, label: 'Reason for deleting' }
   }));
 }
-async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
-async function saveHoursCorrection(e) { if (e.target.id !== 'fHoursEdit') return; e.preventDefault(); try { await api('hours', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity entry corrected'); go('hours'); } catch (x) { toast(x.message); } }
+async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(resolveSite(Object.fromEntries(new FormData(e.target)))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
+async function saveHoursCorrection(e) { if (e.target.id !== 'fHoursEdit') return; e.preventDefault(); try { await api('hours', { method: 'PATCH', body: JSON.stringify(resolveSite(Object.fromEntries(new FormData(e.target)))) }); closeModal(); toast('Activity entry corrected'); go('hours'); } catch (x) { toast(x.message); } }
 
 // Prompt 7: builds the CSV export from exactly the rows/fields the page
 // renders (never a separate recomputation), so an exported total can always
 // be reconciled against what's on screen and, from there, against the
 // source records the server derived it from.
-function buildReportCsv(internName, selectedMonth, s, hoursRows, corrections) {
+function buildReportCsv(internName, selectedMonth, s, hoursRows, corrections, activityBreakdown = []) {
   const rows = [
     ['Monthly report', `${internName || 'Intern'} — ${monthLabel(selectedMonth)}`],
     [],
@@ -828,6 +836,9 @@ function buildReportCsv(internName, selectedMonth, s, hoursRows, corrections) {
     ['Formal requirement', 'Total hours', 'From attended sessions', 'Logged manually']
   ];
   hoursRows.forEach(x => rows.push([x.name, x.total, x.encounter_hours || 0, x.manual_hours || 0]));
+  rows.push([]);
+  rows.push(['Counselling/activity type', 'Facility', 'Hours']);
+  activityBreakdown.forEach(x => rows.push([x.service_type, x.site, x.hours]));
   rows.push([]);
   rows.push(['Corrections this period', corrections.length]);
   corrections.forEach(c => rows.push([`Entry #${c.entity_id}`, c.reason || '', c.created_at || '']));
@@ -876,6 +887,10 @@ async function reports() {
   // (Prompt 4's hours-correction audit trail) is called out by name rather
   // than folded silently back into the total.
   const corrections = data.corrections || [];
+  const activityBreakdown = data.activity_breakdown || [];
+  const activityBreakdownHtml = activityBreakdown.length
+    ? table(['Counselling / activity type', 'Facility', 'Hours'], activityBreakdown.map(x => `<tr><td>${esc(x.service_type)}</td><td>${esc(x.site)}</td><td>${fmt(x.hours)} h</td></tr>`).join(''))
+    : '<div class="card">No activity recorded for this period.</div>';
   const correctionsHtml = corrections.length
     ? corrections.map(c => `<div class="row"><div class="grow">Activity entry #${esc(c.entity_id)} was corrected</div><small class="muted">${esc(c.reason || 'No reason recorded')} · ${esc(new Date(c.created_at).toLocaleDateString())}</small></div>`).join('')
     : 'No corrections recorded this period — the figures above are as originally entered.';
@@ -903,6 +918,7 @@ async function reports() {
       <dt>Formal requirement hours</dt><dd>Hours credited toward each formal category this month, split by source (attended sessions vs. manually logged activity) so the total is traceable back to what was actually recorded.</dd>
     </dl></details>
     <div class="section"><div><h3>Formal requirement hours this month</h3><p>Split by source. Any opening-balance hours were a one-time carry-over at placement start and are not part of this or any other single month.</p></div></div><div class="card list">${hoursRows}</div>
+    <div class="section"><div><h3>Activity by type and facility</h3><p>Individual sessions come from attended encounters; group, family and other activities come from the activity log.</p></div></div>${activityBreakdownHtml}
     <div class="grid two" style="margin-top:14px">
       <div><div class="section tight"><h3>Corrected this period</h3></div><div class="card list">${correctionsHtml}</div></div>
       <div><div class="section tight"><h3>Review history</h3></div><div class="card list">${reviewHistoryHtml}</div></div>
@@ -911,7 +927,7 @@ async function reports() {
     <div class="section"><h3>${isIntern ? 'Submission' : 'Supervisor review'}</h3></div><div class="card field"><label>${isIntern ? 'Reflection / notable activity' : 'Supervisor comment'}<textarea id="comment">${esc(isIntern ? data.report.intern_comment || '' : data.report.supervisor_comment || '')}</textarea></label><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px" class="no-print"><button id="sendReport" class="btn primary">${reviewBtnLabel}</button><button id="exportCsv" class="btn" type="button">Export CSV</button><button id="printReport" class="btn" type="button">Print / Save as PDF</button></div></div>`;
   bindInternSwitcher();
   $('#reportMonth').onchange = e => { S.reportsMonth = e.target.value; go('reports'); };
-  $('#exportCsv').onclick = () => downloadCsv(`report-${(internName || 'intern').replace(/\s+/g, '_')}-${selectedMonth}.csv`, buildReportCsv(internName, selectedMonth, s, data.hours || [], corrections));
+  $('#exportCsv').onclick = () => downloadCsv(`report-${(internName || 'intern').replace(/\s+/g, '_')}-${selectedMonth}.csv`, buildReportCsv(internName, selectedMonth, s, data.hours || [], corrections, activityBreakdown));
   $('#printReport').onclick = () => window.print();
   const submitReport = async () => {
     const btn = $('#sendReport'); if (btn.disabled) return; btn.disabled = true; const original = btn.textContent; btn.textContent = 'Saving…';
@@ -1114,13 +1130,14 @@ async function demoApi(path, options = {}) {
   if(route==='interns'){
     if(method==='PATCH'&&body.action==='resend_invite')return{ok:true,resent_id:+body.id};
     if(method==='PATCH'&&body.action==='reactivate')return{ok:true,reactivated_id:+body.id};
+    if(method==='PATCH'&&body.action==='purge_test_intern'){d.interns=d.interns.filter(x=>x.id!==+body.id);return{ok:true,purged_id:+body.id};}
     return d.interns.map(x=>({...x,requirement_summary:demoRequirement(x.id).summary,invite:x.invite||{status:'Active',invited_at:'2026-05-10',last_sign_in_at:'2026-09-18'}}));
   }
   if(route==='pilot-context')return {schedule:d.schedule[id]||[],planned:d.planned[id]||[]};
   if(route==='feedback'){if(method==='GET')return d.feedback[id]||[];(d.feedback[id]||=[]).unshift({...body,id:Date.now(),status:'New',created_at:new Date().toISOString()});return body;}
   if(route==='requirements'){if(method==='PATCH')return body;return demoRequirement(id||11);}
   if(route==='cases'){if(method==='GET')return id?d.cases.filter(x=>x.intern_profile_id===id):d.cases;let x=d.cases.find(x=>x.id===+body.id);if(method==='PATCH'){Object.assign(x,body);return x}if(method==='POST'){const n={...body,id:Date.now(),intern_profile_id:+body.intern_profile_id,sessions:0,supervision_status:'Not yet',status:'Allocated'};d.cases.push(n);return n;}}
-  if(route==='referrals'){if(method==='GET')return d.referrals;let x=d.referrals.find(x=>x.id===+body.id);if(method==='PATCH'){Object.assign(x,body);return x}const n={...body,id:Date.now(),intern_profile_id:id||+body.intern_profile_id||11,intern_name:'Erin George',contact_attempts:+body.contact_attempts||0};d.referrals.push(n);return n;}
+  if(route==='referrals'){if(method==='GET')return d.referrals;let x=d.referrals.find(x=>x.id===+body.id);if(method==='PATCH'){if(body.action==='accept'){x.accepted_at=new Date().toISOString();return x;}Object.assign(x,body);return x}const n={...body,id:Date.now(),intern_profile_id:id||+body.intern_profile_id||11,intern_name:'Erin George',contact_attempts:+body.contact_attempts||0};d.referrals.push(n);return n;}
   if(route==='encounters'){d.enc.push({...body,booked:String(body.booked)!=='false',attended:String(body.attended)!=='false'});return body;}
   if(route==='supervision'){if(method==='GET')return d.sup[id]||[];if(method==='POST'){(d.sup[id]||=[]).push({...body,id:Date.now(),status:'Open'});return body}return body;}
   if(route==='supervision-feed')return Object.entries(d.sup).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
@@ -1133,6 +1150,7 @@ async function demoApi(path, options = {}) {
       hours:[{code:'counselling',name:'Counselling of children, adolescents & adults',total:11.5,encounter_hours:10.5,manual_hours:1}],
       stats:{booked:12,attended:10,female:6,male:3,other_gender:1,not_recorded_gender:0,intake_sessions:2,follow_up_sessions:7,termination_sessions:1,counselling_minutes:630},
       corrections:[],
+      activity_breakdown:[{service_type:'Individual counselling',site:'Stellenbosch Hospital',hours:10.5},{service_type:'Group counselling',site:'Idas Valley Clinic',hours:1}],
       trend:[{month:'2026-07-01',booked:9,attended:8,hours:9.5},{month:'2026-08-01',booked:11,attended:9,hours:10.8},{month:'2026-09-01',booked:12,attended:10,hours:11.5}],
       review_history:d.report[id]?.status==='Reviewed'?[{action:'review',reason:null,created_at:new Date().toISOString(),detail:'{}'}]:[],
       refreshed_at:new Date().toISOString()
