@@ -773,6 +773,22 @@ async function rangeRequirementHours(env, id, start, end) {
   return unwrap(await admin.rpc('range_requirement_hours', { p_intern_id: id, p_start: start, p_end: end }));
 }
 
+// Prompt 7: "separation of verified, pending and corrected figures." Hours
+// logged this period that were later corrected (functions/api/_handlers.js
+// hoursView() PATCH, audited as action='correct') are flagged here so the
+// report can show which figures were touched after the fact, instead of
+// presenting a corrected number as if it had always read that way.
+async function correctedHoursThisPeriod(admin, id, start, end) {
+  const { data: periodHours, error: hoursErr } = await admin.from('hours').select('id').eq('intern_profile_id', id).gte('work_date', start).lt('work_date', end);
+  if (hoursErr) throw new HttpError(500, hoursErr.message);
+  const ids = (periodHours || []).map(r => String(r.id));
+  if (!ids.length) return [];
+  const { data: corrections, error: corrErr } = await admin.from('audit_log').select('entity_id, reason, created_at')
+    .eq('entity_type', 'hours').eq('action', 'correct').in('entity_id', ids).order('created_at', { ascending: false });
+  if (corrErr) throw new HttpError(500, corrErr.message);
+  return corrections || [];
+}
+
 export async function reports(ctx, env, url, body, method) {
   const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
@@ -780,14 +796,35 @@ export async function reports(ctx, env, url, body, method) {
   const month = (url.searchParams.get('month') || body.month || `${new Date().toISOString().slice(0, 7)}-01`).slice(0, 7) + '-01';
   const end = monthEnd(month);
   if (method === 'GET') {
-    const [reportRes, statsRes, activity] = await Promise.all([
+    const [reportRes, statsRes, activity, corrections, trendRes] = await Promise.all([
       admin.from('monthly_reports').select('*').eq('intern_profile_id', id).eq('month', month).maybeSingle(),
       admin.rpc('report_encounter_stats', { p_intern_id: id, p_start: month, p_end: end }),
-      rangeRequirementHours(env, id, month, end)
+      rangeRequirementHours(env, id, month, end),
+      correctedHoursThisPeriod(admin, id, month, end),
+      admin.rpc('report_trend_stats', { p_intern_id: id, p_months: 6 })
     ]);
     if (reportRes.error) throw new HttpError(500, reportRes.error.message);
     if (statsRes.error) throw new HttpError(500, statsRes.error.message);
-    return { report: reportRes.data || { status: 'Draft' }, hours: activity, stats: statsRes.data };
+    if (trendRes.error) throw new HttpError(500, trendRes.error.message);
+    const report = reportRes.data || { status: 'Draft' };
+    // Review history comes straight from the audit trail (Prompt 4), not a
+    // separate log — every "review"/"submit" action against this exact
+    // report id, oldest first. A report with no id yet (never saved) has no
+    // history rows to find, so this is skipped rather than queried for -1.
+    let reviewHistory = [];
+    if (report.id) {
+      const { data: historyRows, error: historyErr } = await admin.from('audit_log').select('action, reason, created_at, detail')
+        .eq('entity_type', 'monthly_report').eq('entity_id', String(report.id)).order('created_at', { ascending: true });
+      if (historyErr) throw new HttpError(500, historyErr.message);
+      reviewHistory = historyRows || [];
+    }
+    return {
+      report, hours: activity, stats: statsRes.data,
+      corrections,
+      trend: trendRes.data || [],
+      review_history: reviewHistory,
+      refreshed_at: new Date().toISOString()
+    };
   }
   requireMethod(method, ['POST']);
   const status = ctx.role === 'intern' ? 'Submitted' : 'Reviewed';
@@ -1040,6 +1077,7 @@ export async function programme(ctx, env) {
       median_days_to_intake: metrics.median_days_to_intake ?? null
     },
     sites: metrics.sites || [],
-    institutions: metrics.institutions || []
+    institutions: metrics.institutions || [],
+    refreshed_at: new Date().toISOString()
   };
 }
