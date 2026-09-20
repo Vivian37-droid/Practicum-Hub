@@ -45,6 +45,13 @@ function sortReferrals(rows) {
   return rows.sort((a, b) => new Date(b.next_action_date || b.referral_date) - new Date(a.next_action_date || a.referral_date));
 }
 
+const ACTIVITY_SERVICE_TYPES = new Set(['Group counselling', 'Family counselling', 'Other activity']);
+function activityServiceType(value) {
+  const result = value || 'Other activity';
+  if (!ACTIVITY_SERVICE_TYPES.has(result)) throw new HttpError(400, 'Choose a valid activity type');
+  return result;
+}
+
 async function requirementProgress(env, id) {
   const admin = getAdmin(env);
   const { data, error } = await admin.rpc('requirement_progress_data', { p_intern_id: id });
@@ -345,6 +352,25 @@ export async function interns(ctx, env, url, body, method) {
     if (updErr) throw new HttpError(500, updErr.message);
     await audit(ctx, env, 'reactivate', 'intern', internId, { display_name: row.display_name }, internId);
     return { ok: true, reactivated_id: internId };
+  }
+  if (method === 'PATCH' && body.action === 'purge_test_intern') {
+    requireRole(ctx, ['programme_lead']);
+    const internId = Number(body.id || 0);
+    if (!internId) throw new HttpError(400, 'Intern id is required');
+    const { data: row, error } = await admin.from('profiles').select('id, display_name, email, active, identity_user_id').eq('id', internId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!row) throw new HttpError(404, 'Intern not found');
+    if (row.active !== false) throw new HttpError(400, 'Deactivate the test placement before permanently deleting it');
+    if (cleanEmail(body.confirm_email) !== cleanEmail(row.email)) throw new HttpError(400, 'Enter the intern email exactly to confirm permanent deletion');
+    const reason = limited(body.reason, 500, 'Reason', true);
+    await audit(ctx, env, 'purge_test_intern', 'intern', internId, { display_name: row.display_name, email: row.email }, internId, reason);
+    if (row.identity_user_id) {
+      const { error: authErr } = await admin.auth.admin.deleteUser(row.identity_user_id);
+      if (authErr) throw new HttpError(500, `The placement was not deleted because the sign-in account could not be removed: ${authErr.message}`);
+    }
+    const { error: deleteErr } = await admin.from('profiles').delete().eq('id', internId);
+    if (deleteErr) throw new HttpError(500, deleteErr.message);
+    return { ok: true, purged_id: internId };
   }
   // Prompt 8: "invitation date, invitation status, last login and a safe
   // resend-invitation action." Supabase Auth already tracks invited_at/
@@ -651,7 +677,9 @@ export async function hoursView(ctx, env, url, body, method) {
     }
     const note = body.note == null ? row.note : limited(body.note, 1000, 'Note');
     const updated = unwrap(await admin.from('hours').update({
-      work_date: workDate, hours: value, component_code: componentCode, category, note
+      work_date: workDate, hours: value, component_code: componentCode, category, note,
+      site: body.site == null ? row.site : limited(body.site, 120, 'Facility', true),
+      service_type: body.service_type == null ? row.service_type : activityServiceType(body.service_type)
     }).eq('id', hoursId).select().single());
     await audit(ctx, env, 'correct', 'hours', hoursId, { before: row, after: updated }, row.intern_profile_id, reason);
     return updated;
@@ -702,6 +730,8 @@ export async function hoursView(ctx, env, url, body, method) {
     category: component.name,
     component_code: component.code,
     hours: value,
+    site: limited(body.site, 120, 'Facility', true),
+    service_type: activityServiceType(body.service_type),
     note: limited(body.note, 1000, 'Note'),
     created_by_identity_user_id: ctx.user.id
   }).select().single());
@@ -910,16 +940,18 @@ export async function reports(ctx, env, url, body, method) {
   const month = (url.searchParams.get('month') || body.month || `${new Date().toISOString().slice(0, 7)}-01`).slice(0, 7) + '-01';
   const end = monthEnd(month);
   if (method === 'GET') {
-    const [reportRes, statsRes, activity, corrections, trendRes] = await Promise.all([
+    const [reportRes, statsRes, activity, corrections, trendRes, breakdownRes] = await Promise.all([
       admin.from('monthly_reports').select('*').eq('intern_profile_id', id).eq('month', month).maybeSingle(),
       admin.rpc('report_encounter_stats', { p_intern_id: id, p_start: month, p_end: end }),
       rangeRequirementHours(env, id, month, end),
       correctedHoursThisPeriod(admin, id, month, end),
-      admin.rpc('report_trend_stats', { p_intern_id: id, p_months: 6 })
+      admin.rpc('report_trend_stats', { p_intern_id: id, p_months: 6 }),
+      admin.rpc('report_activity_breakdown', { p_intern_id: id, p_start: month, p_end: end })
     ]);
     if (reportRes.error) throw new HttpError(500, reportRes.error.message);
     if (statsRes.error) throw new HttpError(500, statsRes.error.message);
     if (trendRes.error) throw new HttpError(500, trendRes.error.message);
+    if (breakdownRes.error) throw new HttpError(500, breakdownRes.error.message);
     const report = reportRes.data || { status: 'Draft' };
     // Review history comes straight from the audit trail (Prompt 4), not a
     // separate log — every "review"/"submit" action against this exact
@@ -933,7 +965,7 @@ export async function reports(ctx, env, url, body, method) {
       reviewHistory = historyRows || [];
     }
     return {
-      report, hours: activity, stats: statsRes.data,
+      report, hours: activity, stats: statsRes.data, activity_breakdown: breakdownRes.data || [],
       corrections,
       trend: trendRes.data || [],
       review_history: reviewHistory,
@@ -999,6 +1031,23 @@ export async function referrals(ctx, env, url, body, method) {
     return sortReferrals(withInternName(rows));
   }
   requireMethod(method, ['POST', 'PATCH']);
+  if (method === 'PATCH' && body.action === 'accept') {
+    if (ctx.role !== 'intern') throw new HttpError(403, 'Only the allocated intern can accept a referral');
+    const refId = Number(body.id || 0);
+    const { data: current, error } = await admin.from('referrals').select('*').eq('id', refId).maybeSingle();
+    if (error) throw new HttpError(500, error.message);
+    if (!current) throw new HttpError(404, 'Referral not found');
+    if (current.intern_profile_id !== ctx.profile.id) throw new HttpError(403, 'This referral is not allocated to you');
+    if (current.accepted_at) return current;
+    const row = unwrap(await admin.from('referrals').update({
+      accepted_at: new Date().toISOString(),
+      accepted_by_identity_user_id: ctx.user.id,
+      updated_by_identity_user_id: ctx.user.id,
+      updated_at: new Date().toISOString()
+    }).eq('id', refId).select().single());
+    await audit(ctx, env, 'accept', 'referral', refId, { accepted_at: row.accepted_at }, current.intern_profile_id);
+    return row;
+  }
   if (method === 'POST') {
     await assertInternAccess(ctx, id, env);
     const status = body.status || 'Allocated';
