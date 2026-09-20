@@ -390,7 +390,7 @@ function clinicalPaceCard(req) {
       <div><small>Needed counselling pace</small><b>${s.clinical_hours_needed_per_week == null ? '—' : fmt(s.clinical_hours_needed_per_week) + ' h/wk'}</b></div>
       <div><small>Equivalent sessions remaining</small><b>${s.counselling_sessions_remaining == null ? '—' : fmt(s.counselling_sessions_remaining)}</b></div>
       <div><small>Booking target</small><b>${s.bookings_needed_per_week == null ? '—' : fmt(s.bookings_needed_per_week) + '/wk'}</b></div>
-      <div><small>At current pace</small><b>${s.estimated_clinical_target_date ? esc(s.estimated_clinical_target_date) : '—'}</b></div>
+      <div><small>At current pace</small><b>${s.clinical_pace_not_viable ? 'Not viable at current pace' : s.estimated_clinical_target_date ? esc(s.estimated_clinical_target_date) : '—'}</b></div>
       <div><small>Current active cases</small><b>${s.active_cases == null ? '—' : fmt(s.active_cases)}</b></div>
     </div>
     <p class="muted">${s.weeks_remaining == null ? 'Add the official placement end date to calculate the exact weekly target.' : esc(s.caseload_status)}${s.additional_bookings_needed ? ` · approximately ${fmt(s.additional_bookings_needed)} additional bookings/week may be needed.` : ''}</p>
@@ -465,18 +465,34 @@ function bindQueue(items, interns) {
   });
 }
 
+// Prompt 8: "invitation date, invitation status, last login" — Account tag
+// colour follows the same status vocabulary the rest of the app uses.
+const inviteTagClass = status => status === 'Active' ? 'green' : status === 'Invited — pending' ? 'amber' : status === 'Unknown' ? '' : 'red';
 async function interns() {
   const data = await api('interns');
   const isAdmin = S.session.role === 'programme_lead';
   const rows = data.map(x => {
     const s = x.requirement_summary || {};
     const attention = s.at_risk_components ? 'Target at risk' : s.watch_components ? 'Watch' : 'On track';
-    return `<tr><td><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button>${x.active === false ? ' ' + tag('Deactivated') : ''}<br>${esc(x.email)}</td><td class="mobile-secondary" data-label="Institution">${esc(x.institution || '—')}</td><td class="mobile-secondary" data-label="Progress">${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td class="mobile-secondary" data-label="Weeks left">${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td data-label="Status">${tag(attention)}</td><td class="mobile-secondary" data-label="Cases">${x.active_cases}</td><td class="mobile-secondary" data-label="Account"><span class="tag ${x.identity_user_id ? 'green' : 'amber'}">${x.identity_user_id ? 'Login linked' : 'No login linked'}</span></td>${isAdmin ? `<td>${x.active === false ? `<button class="btn small" data-reactivate-intern="${x.id}" data-name="${esc(x.display_name)}" aria-label="Reactivate placement for ${esc(x.display_name)}">Reactivate</button>` : `<button class="btn small danger-btn" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}" aria-label="Deactivate placement for ${esc(x.display_name)}">Deactivate</button>`}</td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
+    const invite = x.invite || { status: 'Unknown', invited_at: null, last_sign_in_at: null };
+    const accountCell = `<span class="tag ${inviteTagClass(invite.status)}">${esc(invite.status)}</span>${invite.invited_at ? `<br><small class="muted">Invited ${esc(new Date(invite.invited_at).toLocaleDateString())}</small>` : ''}<br><small class="muted">${invite.last_sign_in_at ? 'Last login ' + esc(new Date(invite.last_sign_in_at).toLocaleDateString()) : 'Never signed in'}</small>${isAdmin && invite.status !== 'Active' ? `<br><button type="button" class="btn small" data-resend-invite="${x.id}" data-name="${esc(x.display_name)}">Resend invitation</button>` : ''}`;
+    // Deactivate is deliberately styled as a low-key text action, not a
+    // solid red button — Prompt 8: "make destructive administration less
+    // visually prominent." The confirmation dialog (adminDelete/confirmModal)
+    // still shows a proper danger-styled button before anything happens.
+    return `<tr><td><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button>${x.active === false ? ' ' + tag('Deactivated') : ''}<br>${esc(x.email)}</td><td class="mobile-secondary" data-label="Institution">${esc(x.institution || '—')}</td><td class="mobile-secondary" data-label="Progress">${fmt(s.total_completed)} / ${fmt(s.total_target || 720)}</td><td class="mobile-secondary" data-label="Weeks left">${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td data-label="Status">${tag(attention)}</td><td class="mobile-secondary" data-label="Cases">${x.active_cases}</td><td class="mobile-secondary" data-label="Account">${accountCell}</td>${isAdmin ? `<td>${x.active === false ? `<button class="btn small" data-reactivate-intern="${x.id}" data-name="${esc(x.display_name)}" aria-label="Reactivate placement for ${esc(x.display_name)}">Reactivate</button>` : `<button class="btn-subtle" data-del-intern="${x.id}" data-del-name="${esc(x.display_name)}" aria-label="Deactivate placement for ${esc(x.display_name)}">Deactivate</button>`}</td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
   }).join('');
   $('#content').innerHTML = `<div class="section"><div><h2>Intern placements</h2><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
     ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account', ...(isAdmin ? ['Admin'] : [])], rows)}
     <div class="notice info" style="margin-top:12px"><b>Account setup:</b> Adding a new intern automatically sends them a Supabase sign-in invitation by email. SACAP and Cornerstone use different formal hour categories, and the Hub loads the selected profile automatically.</div>`;
   $$('[data-open]').forEach(btn => btn.onclick = () => { setActiveIntern(data.find(i => i.id == btn.dataset.open)); go('progress'); });
+  $$('[data-resend-invite]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    confirmModal(`Resend the invitation to ${esc(b.dataset.name)}?`, `${esc(b.dataset.name)} will receive a new sign-in invitation email. This is safe — it does nothing if they've already accepted and signed in.`, async () => {
+      try { await api('interns', { method: 'PATCH', body: JSON.stringify({ id: b.dataset.resendInvite, action: 'resend_invite' }) }); closeModal(); toast(`Invitation resent to ${b.dataset.name}`); go('interns'); }
+      catch (x) { closeModal(); toast(x.message); }
+    }, { confirmLabel: 'Resend invitation', danger: false });
+  }));
   $('#addIntern')?.addEventListener('click', () => { modal('Add intern', `<form id="fIntern" class="formgrid"><div class="field"><label>Name<input name="display_name" required></label></div><div class="field"><label>Email<input name="email" type="email" required></label></div><div class="field"><label>Institution<select name="institution"><option>SACAP</option><option>Cornerstone Institute</option><option>Other</option></select></label></div><div class="field"><label>Default counselling session length (min)<input name="default_session_minutes" type="number" min="15" max="240" value="60"></label></div><div class="field"><label>Placement start<input name="placement_start" type="date"></label></div><div class="field"><label>Placement end<input name="placement_end" type="date"></label></div><div class="full"><button class="btn primary">Create placement</button></div></form>`); });
   $$('[data-del-intern]').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
@@ -512,26 +528,95 @@ function bindPresentingCategoryToggle(form){const sel=form.querySelector('select
 function resolvePresentingCategory(item){if(item.presenting_category==='__other__'){item.presenting_category=(item.presenting_category_other||'').trim();}delete item.presenting_category_other;return item;}
 const REFERRAL_UPDATE_CATEGORIES = ['Attempted contact – no response','Contact made – booking pending','Appointment booked','Attended – intake completed','No-show','Re-referred / closed','Awaiting supervisor feedback','Other – see note'];
 const referralUpdateCategoryOptions = (selected = '') => `<option value="">Select an update…</option>` + REFERRAL_UPDATE_CATEGORIES.map(c => `<option ${c === selected ? 'selected' : ''}>${c}</option>`).join('');
+// Prompt 8: "surface the next required action" — a plain-language next step
+// derived from the referral's own status, so a supervisor scanning the list
+// doesn't have to infer it themselves from the status tag alone.
+function referralNextAction(x) {
+  if (String(x.status).startsWith('Closed')) return 'None — closed';
+  return ({
+    'Allocated': 'Attempt first contact',
+    'Contact attempted': 'Follow up the contact attempt',
+    'Contact made': 'Schedule a booking',
+    'Booked': 'Confirm attendance / prepare intake',
+    'Intake completed': 'Begin ongoing sessions',
+    'Active': 'Continue sessions and monitor progress',
+    'Awaiting feedback': 'Follow up for feedback',
+    'Reallocated': 'Confirm the new allocation'
+  })[x.status] || 'Review current status';
+}
+const REFERRAL_SORTS = {
+  next_action_asc: { label: 'Next action (soonest first)', cmp: (a, b) => (a.next_action_date || '9999-99-99').localeCompare(b.next_action_date || '9999-99-99') },
+  overdue_desc: { label: 'Most overdue first', cmp: (a, b) => referralDaysOverdue(b) - referralDaysOverdue(a) },
+  code_asc: { label: 'Code (A–Z)', cmp: (a, b) => String(a.referral_code).localeCompare(String(b.referral_code)) },
+  priority_desc: { label: 'Priority (highest first)', cmp: (a, b) => ({ Urgent: 2, Priority: 1, Routine: 0 }[b.priority] || 0) - ({ Urgent: 2, Priority: 1, Routine: 0 }[a.priority] || 0) }
+};
+function referralDaysOverdue(x) {
+  if (!x.next_action_date || String(x.status).startsWith('Closed')) return -Infinity;
+  return Math.floor((new Date(today()) - new Date(x.next_action_date)) / 86400000);
+}
 async function referrals() {
   const own = S.session.role === 'intern', query = own ? 'referrals' : (S.intern?.id ? `referrals?intern_id=${S.intern.id}` : 'referrals');
   const [data, internsData] = await Promise.all([api(query), own ? Promise.resolve([]) : api('interns')]);
-  const open = data.filter(x => !String(x.status).startsWith('Closed')).length;
-  const overdue = data.filter(x => x.next_action_date && x.next_action_date < today() && !String(x.status).startsWith('Closed')).length;
   const isAdmin = S.session.role === 'programme_lead';
-  const rows = data.map(x => `<tr><td><b>${esc(x.referral_code)}</b></td>${own?'':`<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Allocated">${esc(x.referral_date)}</td><td class="mobile-secondary" data-label="Source">${esc(x.referral_source||'—')}</td><td class="mobile-secondary" data-label="Site">${esc(x.site||'—')}</td><td class="mobile-secondary" data-label="Category">${esc(x.presenting_category||'—')}</td><td data-label="Priority">${tag(x.priority)}</td><td data-label="Status">${tag(x.status)}</td><td class="mobile-secondary" data-label="Attempts">${x.contact_attempts}</td><td data-label="Next action">${x.next_action_date?esc(x.next_action_date):'—'}</td><td class="mobile-secondary" data-label="Latest update">${x.update_category?tag(x.update_category):'—'}${x.last_update?`<br><small class="muted">${esc(x.last_update)}</small>`:''}</td><td><button class="btn small" data-referral-update="${x.id}" aria-label="Update referral ${esc(x.referral_code)}">Update</button>${isAdmin?` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}" aria-label="Delete referral ${esc(x.referral_code)}">Delete</button>`:''}</td><td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`).join('');
-  $('#content').innerHTML = `<div class="hero"><small>De-identified workflow</small><h2>${own?'Track the referrals allocated to you.':'See what happened after each referral was allocated.'}</h2><p>Record contact progress, booking, intake and closure so referrals do not disappear from view.</p><div class="actions"><button id="addReferral" class="btn">Add referral</button></div></div>
-    <div class="grid metrics">${metric('Open referrals',open)}${metric('Overdue next actions',overdue)}${metric('Total tracked',data.length)}${metric('Awaiting feedback',data.filter(x=>x.status==='Awaiting feedback').length)}</div>
-    <div class="section"><div><h3>${own?'My referral list':S.intern?esc(S.intern.display_name)+' · referrals':'All intern referrals'}</h3><p>Status and a short operational update are visible to the intern and supervisor.</p></div></div>
-    ${table(['Code',...(own?[]:['Intern']),'Allocated','Source','Site','Category','Priority','Status','Attempts','Next action','Latest update',''],rows,'No referrals have been added yet.')}
+  const sites = [...new Set(data.map(x => x.site).filter(Boolean))].sort();
+  const statuses = [...new Set(data.map(x => x.status).filter(Boolean))].sort();
+  const internNames = own ? [] : [...new Set(data.map(x => x.intern_name).filter(Boolean))].sort();
+  const filters = { q: '', status: '', site: '', intern: '', overdueOnly: false, sort: 'next_action_asc' };
+
+  const rowHtml = x => {
+    const daysOverdue = referralDaysOverdue(x);
+    const nextActionCell = x.next_action_date
+      ? `${esc(x.next_action_date)}${daysOverdue > 0 ? `<br><span class="tag red">${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue</span>` : ''}`
+      : '—';
+    return `<tr><td><b>${esc(x.referral_code)}</b></td>${own ? '' : `<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Allocated">${esc(x.referral_date)}</td><td class="mobile-secondary" data-label="Source">${esc(x.referral_source || '—')}</td><td class="mobile-secondary" data-label="Site">${esc(x.site || '—')}</td><td class="mobile-secondary" data-label="Category">${esc(x.presenting_category || '—')}</td><td data-label="Priority">${tag(x.priority)}</td><td data-label="Status">${tag(x.status)}</td><td class="mobile-secondary" data-label="Attempts">${x.contact_attempts}</td><td data-label="Next action">${nextActionCell}</td><td data-label="Next required action"><small>${esc(referralNextAction(x))}</small></td><td class="mobile-secondary" data-label="Latest update">${x.update_category ? tag(x.update_category) : '—'}${x.last_update ? `<br><small class="muted">${esc(x.last_update)}</small>` : ''}</td><td><button class="btn small" data-referral-update="${x.id}" aria-label="Update referral ${esc(x.referral_code)}">Update</button>${isAdmin ? ` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}" aria-label="Delete referral ${esc(x.referral_code)}">Delete</button>` : ''}</td><td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
+  };
+
+  const draw = () => {
+    let filtered = data.filter(x => {
+      if (filters.status && x.status !== filters.status) return false;
+      if (filters.site && x.site !== filters.site) return false;
+      if (filters.intern && x.intern_name !== filters.intern) return false;
+      if (filters.overdueOnly && referralDaysOverdue(x) <= 0) return false;
+      if (filters.q) {
+        const hay = `${x.referral_code} ${x.site || ''} ${x.presenting_category || ''} ${x.intern_name || ''} ${x.last_update || ''}`.toLowerCase();
+        if (!hay.includes(filters.q.toLowerCase())) return false;
+      }
+      return true;
+    });
+    filtered.sort(REFERRAL_SORTS[filters.sort].cmp);
+    $('#refTableWrap').innerHTML = table(['Code', ...(own ? [] : ['Intern']), 'Allocated', 'Source', 'Site', 'Category', 'Priority', 'Status', 'Attempts', 'Next action', 'Next required action', 'Latest update', ''], filtered.map(rowHtml).join(''), data.length ? 'No referrals match these filters.' : 'No referrals have been added yet.');
+    $$('[data-referral-update]').forEach(b => b.onclick = () => referralModal(data.find(x => x.id == b.dataset.referralUpdate), internsData));
+    $$('[data-del-referral]').forEach(b => b.onclick = () => adminDelete('referrals', b.dataset.delReferral, `referral ${b.dataset.code}`, () => go('referrals'), {
+      message: `This permanently deletes referral ${esc(b.dataset.code)} unless undone. It can be restored from the confirmation toast right after deleting.`,
+      reason: { required: false, label: 'Reason (optional)' },
+      restorePath: 'audit-restore'
+    }));
+    bindRowExpand();
+  };
+
+  const open = data.filter(x => !String(x.status).startsWith('Closed')).length;
+  const overdue = data.filter(x => referralDaysOverdue(x) > 0).length;
+  $('#content').innerHTML = `<div class="hero"><small>De-identified workflow</small><h2>${own ? 'Track the referrals allocated to you.' : 'See what happened after each referral was allocated.'}</h2><p>Record contact progress, booking, intake and closure so referrals do not disappear from view.</p><div class="actions"><button id="addReferral" class="btn">Add referral</button></div></div>
+    <div class="grid metrics">${metric('Open referrals', open)}${metric('Overdue next actions', overdue)}${metric('Total tracked', data.length)}${metric('Awaiting feedback', data.filter(x => x.status === 'Awaiting feedback').length)}</div>
+    <div class="section"><div><h3>${own ? 'My referral list' : S.intern ? esc(S.intern.display_name) + ' · referrals' : 'All intern referrals'}</h3><p>Status and a short operational update are visible to the intern and supervisor.</p></div></div>
+    <div class="card" style="margin-bottom:14px"><div class="formgrid">
+      <div class="field"><label>Search<input id="refSearch" placeholder="Code, site, category…"></label></div>
+      <div class="field"><label>Status<select id="refStatus"><option value="">All statuses</option>${statuses.map(s => `<option>${esc(s)}</option>`).join('')}</select></label></div>
+      <div class="field"><label>Facility<select id="refSite"><option value="">All facilities</option>${sites.map(s => `<option>${esc(s)}</option>`).join('')}</select></label></div>
+      ${own ? '' : `<div class="field"><label>Intern<select id="refIntern"><option value="">All interns</option>${internNames.map(n => `<option>${esc(n)}</option>`).join('')}</select></label></div>`}
+      <div class="field"><label>Sort by<select id="refSort">${Object.entries(REFERRAL_SORTS).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('')}</select></label></div>
+      <div class="field" style="align-self:end"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;font-weight:600"><input id="refOverdueOnly" type="checkbox" style="width:auto;min-height:0"> Overdue only</label></div>
+    </div></div>
+    <div id="refTableWrap"></div>
     <div class="notice info" style="margin-top:12px">Do not enter patient names, ID numbers, phone numbers, addresses or clinical narrative. Keep clinical documentation in the approved patient record.</div>`;
-  $('#addReferral').onclick=()=>referralModal(null,internsData);
-  $$('[data-referral-update]').forEach(b=>b.onclick=()=>referralModal(data.find(x=>x.id==b.dataset.referralUpdate),internsData));
-  $$('[data-del-referral]').forEach(b=>b.onclick=()=>adminDelete('referrals', b.dataset.delReferral, `referral ${b.dataset.code}`, () => go('referrals'), {
-    message: `This permanently deletes referral ${esc(b.dataset.code)} unless undone. It can be restored from the confirmation toast right after deleting.`,
-    reason: { required: false, label: 'Reason (optional)' },
-    restorePath: 'audit-restore'
-  }));
-  bindRowExpand();
+  $('#addReferral').onclick = () => referralModal(null, internsData);
+  $('#refSearch').oninput = e => { filters.q = e.target.value; draw(); };
+  $('#refStatus').onchange = e => { filters.status = e.target.value; draw(); };
+  $('#refSite').onchange = e => { filters.site = e.target.value; draw(); };
+  $('#refIntern')?.addEventListener('change', e => { filters.intern = e.target.value; draw(); });
+  $('#refSort').onchange = e => { filters.sort = e.target.value; draw(); };
+  $('#refOverdueOnly').onchange = e => { filters.overdueOnly = e.target.checked; draw(); };
+  draw();
 }
 function referralModal(item, internsData) {
   const isEdit=!!item, own=S.session.role==='intern';
@@ -561,10 +646,11 @@ async function requirementsView() {
   $('#content').innerHTML = switcherHtml + `<div class="hero"><small>${esc(req.profile.requirement_profile_name || '')}</small><h2>${S.session.role === 'intern' ? 'Your requirement profile' : esc(req.profile.display_name) + ' · requirement profile'}</h2><p>The 720-hour programme is broken into the categories required by the intern’s institution. Campus/institution components remain visible without making the placement site responsible for producing them.</p><div class="actions"><button class="btn" data-go="hours">Log non-session activity</button><button class="btn" data-go="cases">Record counselling activity</button><button class="btn" data-go="assistant">Ask about my progress</button></div></div>
     ${requirementSummaryCard(req)}
     ${s.source_audit ? `<div class="notice amber" style="margin-top:14px"><b>Imported logbook audit:</b> The institutional sheet displays <b>${fmt(s.source_audit.sheet_displayed_total)} h</b>, while <b>${fmt(s.source_audit.evidence_backed_total)} h</b> is currently supported by student-signed rows. <b>${fmt(s.source_audit.unconfirmed_prefilled_hours)} h</b> appears in pre-filled rows without the student signature and has not been counted as completed in this pilot. ${s.source_audit.data_quality_note ? esc(s.source_audit.data_quality_note) : ''}</div>` : ''}
-    ${pilot ? `<div style="margin-top:14px">${weeklyScheduleCard(pilot.schedule, isAdmin, id)}</div>` : ''}
-    <div class="grid two" style="margin-top:14px">${clinicalPaceCard(req)}<div class="card"><h3>How the target works</h3><p>Remaining hours ÷ remaining placement weeks gives the weekly pace required. Counselling is translated into equivalent attended sessions and a booking target adjusted for the intern’s actual attendance rate.</p><p class="muted">Individual counselling activity is derived from attended case sessions and their duration. This avoids logging the same clinical time twice.</p>${canSetOpening ? '<p class="muted">For interns already mid-placement, use <b>Opening balance</b> once to carry across hours already completed in their institutional logbook. New Hub activity is then added from that point forward.</p>' : ''}</div></div>
+    ${clinicalPaceCard(req)}
+    <details class="card" style="margin-top:14px"><summary style="cursor:pointer;font-weight:800">How the target works</summary><div style="margin-top:10px"><p>Remaining hours ÷ remaining placement weeks gives the weekly pace required. Counselling is translated into equivalent attended sessions and a booking target adjusted for the intern’s actual attendance rate.</p><p class="muted">Individual counselling activity is derived from attended case sessions and their duration. This avoids logging the same clinical time twice.</p>${canSetOpening ? '<p class="muted">For interns already mid-placement, use <b>Opening balance</b> once to carry across hours already completed in their institutional logbook. New Hub activity is then added from that point forward.</p>' : ''}</div></details>
     <div class="section"><div><h3>Formal requirements</h3><p>Verified SACAP / Cornerstone categories.</p></div></div>${table(['Requirement', 'Completed', 'Progress', 'Remaining', 'Needed / week', 'Projected', 'Status', ...(canSetOpening ? ['Existing hours'] : [])], rows)}
     ${deliverables.length ? `<div class="section"><div><h3>Required deliverables</h3><p>Tracked as completion tasks rather than invented hour values.</p></div></div><div class="card list">${deliverables.map(d => `<div class="row"><div class="grow"><b>${esc(d.name)}</b><br><small class="muted">${responsibilityLabel(d.responsibility)}</small></div><select data-deliverable="${d.id}" aria-label="Status for ${esc(d.name)}"><option ${d.deliverable_status === 'Not started' ? 'selected' : ''}>Not started</option><option ${d.deliverable_status === 'In progress' ? 'selected' : ''}>In progress</option><option ${d.deliverable_status === 'Complete' ? 'selected' : ''}>Complete</option></select></div>`).join('')}</div>` : ''}
+    ${pilot ? `<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:800;padding:8px 0">Weekly schedule</summary><div style="margin-top:6px">${weeklyScheduleCard(pilot.schedule, isAdmin, id)}</div></details>` : ''}
     <div class="notice info" style="margin-top:14px"><b>Verified requirement profile:</b> ${esc(req.profile.requirement_profile_name || 'Generic')}. Hour targets are based on the supplied 2026 source material. Site/shared/campus responsibility labels are operational programme classifications and can be adjusted if the institutions specify a different split.</div>`;
   bindGo();
   bindInternSwitcher();
@@ -629,25 +715,54 @@ async function supervision() {
     if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   }
   const id = activeId(), data = await api(`supervision?intern_id=${id}`), isIntern = S.session.role === 'intern', isAdmin = S.session.role === 'programme_lead';
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h2><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}" aria-label="Review supervision item: ${esc(x.topic)}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}" data-topic="${esc(x.topic)}" aria-label="Delete supervision item: ${esc(x.topic)}">Delete</button>` : ''}</div>`).join('') || 'No supervision items.'}</div>`;
+  // Prompt 8: "improve the empty state with safe examples" — de-identified,
+  // generic scenarios that model good use without referencing any real
+  // patient, so the empty state doubles as a quick example of what belongs
+  // here.
+  const SUPERVISION_EXAMPLES = [
+    'Risk assessment approach for a client presenting with passive suicidal ideation',
+    'How to structure a termination session when a client discontinues abruptly',
+    'Formulation uncertainty on a case with overlapping anxiety and grief presentations'
+  ];
+  const emptyState = `<div class="notice info"><b>No supervision items yet.</b> A good supervision item is a specific question, e.g.:<ul style="margin:8px 0 0;padding-left:18px">${SUPERVISION_EXAMPLES.map(e => `<li>${esc(e)}</li>`).join('')}</ul></div>`;
+  const dueLabel = x => {
+    if (!x.due_date) return '';
+    const overdue = x.due_date < today() && x.status === 'Open';
+    return ` ${overdue ? `<span class="tag red">Due ${esc(x.due_date)} — overdue</span>` : `<span class="tag">Due ${esc(x.due_date)}</span>`}`;
+  };
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h2><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}${dueLabel(x)}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Response:</b> ${esc(x.supervisor_note)}</small>` : ''}<br><small class="muted">${x.assigned_supervisor_name ? `Assigned to ${esc(x.assigned_supervisor_name)}` : 'Not yet assigned to a specific supervisor'}</small></div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}" aria-label="Review supervision item: ${esc(x.topic)}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}" data-topic="${esc(x.topic)}" aria-label="Delete supervision item: ${esc(x.topic)}">Delete</button>` : ''}</div>`).join('') || emptyState}</div>`;
   bindInternSwitcher();
   $('#addSup').onclick = () => supervisionModal(id);
-  $$('[data-review]').forEach(b => b.onclick = () => { const x = data.find(i => i.id == b.dataset.review); modal('Review supervision item', `<form id="fSupReview"><input type="hidden" name="id" value="${x.id}"><div class="field"><label>Supervisor response<textarea name="supervisor_note">${esc(x.supervisor_note || '')}</textarea></label></div><div class="field"><label>Status<select name="status"><option>Open</option><option selected>Reviewed</option><option>Closed</option></select></label></div><button class="btn primary">Save</button></form>`); });
+  $$('[data-review]').forEach(b => b.onclick = () => { const x = data.find(i => i.id == b.dataset.review); modal('Review supervision item', `<form id="fSupReview"><input type="hidden" name="id" value="${x.id}"><div class="field"><label>Supervisor response<textarea name="supervisor_note">${esc(x.supervisor_note || '')}</textarea></label></div><div class="field"><label>Due date<input name="due_date" type="date" value="${esc(x.due_date || '')}"></label></div><div class="field"><label>Status<select name="status"><option>Open</option><option selected>Reviewed</option><option>Closed</option></select></label></div><button class="btn primary">Save</button></form>`); });
   $$('[data-del-sup]').forEach(b => b.onclick = () => adminDelete('supervision', b.dataset.delSup, `supervision item “${b.dataset.topic}”`, () => go('supervision'), {
     message: `This permanently deletes the supervision item “${esc(b.dataset.topic)}” unless undone. It can be restored from the confirmation toast right after deleting.`,
     reason: { required: false, label: 'Reason (optional)' },
     restorePath: 'audit-restore'
   }));
 }
-function supervisionModal(id, preset = {}) { modal('Add to supervision', `<form id="fSup" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Topic<input name="topic" value="${esc(preset.topic || '')}" required></label></div><div class="field"><label>Priority<select name="priority"><option>Routine</option><option>Important</option><option>Risk / urgent</option></select></label></div><div class="full field"><label>What exactly are you unsure about?<textarea name="question" required>${esc(preset.question || '')}</textarea></label></div><div class="full field"><label>What have you already considered / tried?<textarea name="action_taken">${esc(preset.action_taken || '')}</textarea></label></div><div class="full"><button class="btn primary">Add to supervision</button></div></form>`); }
+function supervisionModal(id, preset = {}) { modal('Add to supervision', `<form id="fSup" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Topic<input name="topic" value="${esc(preset.topic || '')}" required></label></div><div class="field"><label>Priority<select name="priority"><option>Routine</option><option>Important</option><option>Risk / urgent</option></select></label></div><div class="field"><label>Due date (optional)<input name="due_date" type="date"></label></div><div class="full field"><label>What exactly are you unsure about?<textarea name="question" required>${esc(preset.question || '')}</textarea></label></div><div class="full field"><label>What have you already considered / tried?<textarea name="action_taken">${esc(preset.action_taken || '')}</textarea></label></div><div class="full"><button class="btn primary">Add to supervision</button></div></form>`); }
 async function saveSup(e) { if (e.target.id !== 'fSup') return; e.preventDefault(); try { await api('supervision', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Added to supervision'); if (S.view === 'supervision') go('supervision'); } catch (x) { toast(x.message); } }
 async function saveSupReview(e) { if (e.target.id !== 'fSupReview') return; e.preventDefault(); try { await api('supervision', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Supervision updated'); go('supervision'); } catch (x) { toast(x.message); } }
 
+// Prompt 8: "define behavioural anchors for ratings 1–5" — one shared
+// rubric across all nine fixed competencies (their own descriptions
+// already say what each competency covers; this says what each rating
+// number means for any of them).
+const COMPETENCY_ANCHORS = [
+  [1, 'Not yet demonstrated', 'Requires direct supervisor guidance or modelling to attempt this.'],
+  [2, 'Emerging', 'Attempts this with significant support and prompting.'],
+  [3, 'Developing', 'Performs this independently in straightforward situations.'],
+  [4, 'Competent', 'Performs this independently and consistently across varied situations.'],
+  [5, 'Advanced', 'Performs this independently, adapts it to complex situations, and can model it for others.']
+];
+function competencyAnchorsHtml() {
+  return `<details class="card" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:800">What each rating means (1–5)</summary><dl class="definitions">${COMPETENCY_ANCHORS.map(([n, label, desc]) => `<dt>${n} — ${esc(label)}</dt><dd>${esc(desc)}</dd>`).join('')}</dl></details>`;
+}
 async function competencies() {
   const switcherHtml = await internSwitcherHtml();
   if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), data = await api(`competencies?intern_id=${id}`), isIntern = S.session.role === 'intern';
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${isIntern ? 'My competency development' : 'Competency development'}</h2><p>Ratings are supported by evidence and supervisor feedback.</p></div></div><div class="grid three">${data.map(x => `<div class="card competency"><b>${esc(x.name)}</b><p class="muted">${esc(x.description)}</p><div class="rating"><span>Intern</span><b>${x.intern_rating || '—'} / 5</b><span>Supervisor</span><b>${x.supervisor_rating || '—'} / 5</b></div>${x.evidence ? `<p><small><b>Evidence:</b> ${esc(x.evidence)}</small></p>` : ''}${x.supervisor_comment ? `<p><small><b>Feedback:</b> ${esc(x.supervisor_comment)}</small></p>` : ''}<button class="btn" data-comp="${x.id}" aria-label="${isIntern ? 'Update reflection for' : 'Assess'} ${esc(x.name)}">${isIntern ? 'Update reflection' : 'Assess / feedback'}</button></div>`).join('')}</div>`;
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${isIntern ? 'My competency development' : 'Competency development'}</h2><p>Ratings are supported by evidence and supervisor feedback.</p></div></div>${competencyAnchorsHtml()}<div class="grid three">${data.map(x => `<div class="card competency"><b>${esc(x.name)}</b><p class="muted">${esc(x.description)}</p><div class="rating"><span>Intern</span><b>${x.intern_rating || '—'} / 5</b><span>Supervisor</span><b>${x.supervisor_rating || '—'} / 5</b></div>${x.evidence ? `<p><small><b>Evidence:</b> ${esc(x.evidence)}</small></p>` : ''}${x.supervisor_comment ? `<p><small><b>Feedback:</b> ${esc(x.supervisor_comment)}</small></p>` : ''}${x.history?.length ? `<details><summary>History (${x.history.length})</summary><div class="list" style="margin-top:6px">${x.history.map(h => `<div class="row"><div class="grow"><small>${h.actor_role === 'intern' ? 'Self' : 'Supervisor'} rating ${h.intern_rating ?? h.supervisor_rating ?? '—'}/5 by ${esc(h.actor_name || 'unknown')}</small></div><small class="muted">${esc(new Date(h.created_at).toLocaleDateString())}</small></div>`).join('')}</div></details>` : ''}<button class="btn" data-comp="${x.id}" aria-label="${isIntern ? 'Update reflection for' : 'Assess'} ${esc(x.name)}">${isIntern ? 'Update reflection' : 'Assess / feedback'}</button></div>`).join('')}</div>`;
   bindInternSwitcher();
   $$('[data-comp]').forEach(b => b.onclick = () => competencyModal(data.find(x => x.id == b.dataset.comp), id, isIntern));
 }
@@ -670,7 +785,7 @@ async function hours() {
   const isAdmin = S.session.role === 'programme_lead';
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>Activity log</h2><p>Log non-individual counselling activities directly against the institution’s formal categories.</p></div><button id="logHours" class="btn primary">Log activity hours</button></div>
     <div class="grid two"><div class="notice info"><b>Individual counselling is automatic.</b><br>Attended case sessions and their duration feed the counselling requirement. Do not log those hours again here.</div><div class="card"><b>${esc(req.profile.requirement_profile_name || '')}</b><p class="muted">${fmt(req.summary.total_completed)} of ${fmt(req.summary.total_target)} formal hours currently recorded.</p>${progressBar(req.summary.total_completed, req.summary.total_target)}</div></div>
-    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b><br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small" data-edit-hours="${x.id}" aria-label="Edit activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Edit</button> <button class="btn small danger-btn" data-del-hours="${x.id}" aria-label="Delete activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
+    <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b>${x.correction_history?.length ? ` <span class="tag amber">Corrected ×${x.correction_history.length}</span>` : ''}<br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small>${x.correction_history?.length ? `<details><summary>Correction history</summary><div class="list" style="margin-top:6px">${x.correction_history.map(h => `<div class="row"><div class="grow"><small>${esc(h.reason || 'No reason recorded')}${h.before && h.after ? ` — ${fmt(h.before.hours)} h → ${fmt(h.after.hours)} h` : ''}</small></div><small class="muted">${esc(new Date(h.created_at).toLocaleDateString())}</small></div>`).join('')}</div></details>` : ''}</div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small" data-edit-hours="${x.id}" aria-label="Edit activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Edit</button> <button class="btn small danger-btn" data-del-hours="${x.id}" aria-label="Delete activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
   bindInternSwitcher();
   $('#logHours').onclick = () => modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`);
   // Prompt 4: "a correction workflow for logged hours rather than silent
@@ -931,7 +1046,13 @@ async function programme() {
 
 function handbook() {
   const H = window.HANDBOOK;
-  $('#content').innerHTML = `<div class="handbook"><div class="hindex"><div style="padding:10px"><label class="sr-only" for="hsearch">Search handbook</label><input id="hsearch" placeholder="Search handbook…"></div><nav id="hlist" class="hlist" aria-label="Handbook sections"></nav></div><article class="harticle"><div class="hhead"><small id="hnum"></small><h2 id="htitle"></h2><button id="askSection" class="btn ghost">Ask about this section</button></div><div id="hbody" class="hbody"></div></article></div>`;
+  const meta = H.meta || {};
+  // Prompt 8: "add document version, content owner, approval date and
+  // review date" — shown honestly: fields the programme hasn't set yet say
+  // so instead of a placeholder that looks like a real date.
+  const metaLine = `Version ${esc(meta.version || '—')} · Content owner: ${meta.contentOwner ? esc(meta.contentOwner) : '<b>not yet configured</b>'} · Approved: ${meta.approvedDate ? esc(meta.approvedDate) : '<b>not yet configured</b>'} · Next review: ${meta.reviewDate ? esc(meta.reviewDate) : '<b>not yet configured</b>'}`;
+  $('#content').innerHTML = `<div class="notice info" style="margin-bottom:10px">${metaLine}</div>
+    <div class="handbook"><div class="hindex"><div style="padding:10px"><label class="sr-only" for="hsearch">Search handbook</label><input id="hsearch" placeholder="Search handbook…"><p class="muted" style="font-size:11px;margin:8px 0 0">Section numbers follow the original handbook document order; they're grouped by topic below for easier browsing, so numbers within a group are not always consecutive.</p></div><nav id="hlist" class="hlist" aria-label="Handbook sections"></nav></div><article class="harticle"><div class="hhead"><small id="hnum"></small><h2 id="htitle"></h2><button id="askSection" class="btn ghost">Ask about this section</button></div><div id="hbody" class="hbody"></div></article></div>`;
   // Prompt 2: these were clickable <div>s — not focusable, not announced as
   // interactive, and not operable with Enter/Space. Real <button>s fix all
   // three at once; .hitem's CSS resets the browser's default button chrome
@@ -990,7 +1111,11 @@ async function demoApi(path, options = {}) {
   const d=S.data,[route,qs='']=path.split('?'),q=new URLSearchParams(qs),method=options.method||'GET',body=options.body?JSON.parse(options.body):{},id=+(q.get('intern_id')||(S.session.role==='intern'?11:S.intern?.id||0));
   d.referrals ||= [];
   if(route==='dashboard'){if(S.session.role==='intern')return{metrics:{active_cases:0,open_supervision:0},requirements:demoRequirement(11)};if(S.session.role==='management')return demoProgramme(d);const interns=d.interns.map(x=>({...x,requirements:demoRequirement(x.id).summary,requirement_profile_name:demoRequirement(x.id).profile.requirement_profile_name}));const atRisk=interns.reduce((n,p)=>n+(p.requirements.at_risk_components>0?1:0),0);return{interns,metrics:{interns:1,active_cases:0,open_supervision:0,at_risk}};}
-  if(route==='interns')return d.interns.map(x=>({...x,requirement_summary:demoRequirement(x.id).summary}));
+  if(route==='interns'){
+    if(method==='PATCH'&&body.action==='resend_invite')return{ok:true,resent_id:+body.id};
+    if(method==='PATCH'&&body.action==='reactivate')return{ok:true,reactivated_id:+body.id};
+    return d.interns.map(x=>({...x,requirement_summary:demoRequirement(x.id).summary,invite:x.invite||{status:'Active',invited_at:'2026-05-10',last_sign_in_at:'2026-09-18'}}));
+  }
   if(route==='pilot-context')return {schedule:d.schedule[id]||[],planned:d.planned[id]||[]};
   if(route==='feedback'){if(method==='GET')return d.feedback[id]||[];(d.feedback[id]||=[]).unshift({...body,id:Date.now(),status:'New',created_at:new Date().toISOString()});return body;}
   if(route==='requirements'){if(method==='PATCH')return body;return demoRequirement(id||11);}
