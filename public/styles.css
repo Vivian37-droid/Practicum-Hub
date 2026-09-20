@@ -112,3 +112,22 @@ button:disabled{opacity:.6;cursor:not-allowed}
   main{min-width:0}
   .shell{display:block}
 }
+
+/* Moving programme-partner and encouragement band */
+.institution-strip{height:82px;display:block;overflow:hidden;padding:0;background:#fff;border-bottom:1px solid var(--line)}
+.institution-track{display:flex;width:max-content;min-width:100%;height:100%;animation:institution-scroll 42s linear infinite;will-change:transform}
+.institution-group{display:flex;align-items:center;gap:34px;flex-shrink:0;padding:10px 34px}
+.institution-logo{display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.institution-logo.cornerstone-logo{padding:6px 12px;border-radius:9px;background:var(--navy)}
+.institution-logo img{display:block;width:auto;object-fit:contain}
+.institution-strip .institution-logo.wcg-logo img{height:56px;max-height:none;max-width:250px}
+.institution-strip .institution-logo.sacap-logo img{height:38px;max-height:none;max-width:120px}
+.institution-strip .institution-logo.cornerstone-logo img{height:46px;max-height:none;max-width:210px}
+.institution-quote{position:relative;margin:0;padding-left:22px;white-space:nowrap;color:var(--navy2);font:italic 600 15px/1.35 Georgia,serif}
+.institution-quote:before{content:"";position:absolute;left:0;top:50%;width:7px;height:7px;border-radius:50%;background:var(--teal);transform:translateY(-50%)}
+.institution-strip:hover .institution-track,.institution-strip:focus-within .institution-track{animation-play-state:paused}
+@keyframes institution-scroll{to{transform:translateX(-50%)}}
+@media(prefers-reduced-motion:reduce){.institution-track{animation:none;transform:none}.institution-strip{overflow-x:auto}.institution-group[aria-hidden="true"]{display:none}}
+@media(max-width:900px){.institution-strip{height:72px}.institution-group{gap:24px;padding:8px 24px}.institution-strip .institution-logo.wcg-logo img{height:44px;max-height:none;max-width:210px}.institution-strip .institution-logo.sacap-logo img{height:32px;max-height:none;max-width:100px}.institution-strip .institution-logo.cornerstone-logo img{height:38px;max-height:none;max-width:180px}.institution-quote{font-size:14px}}
+@media(max-width:600px){.institution-strip{height:64px}.institution-group{gap:20px;padding:7px 20px}.institution-logo.cornerstone-logo{padding:5px 9px}.institution-strip .institution-logo.wcg-logo img{height:38px;max-height:none;max-width:185px}.institution-strip .institution-logo.sacap-logo img{height:28px;max-height:none;max-width:88px}.institution-strip .institution-logo.cornerstone-logo img{height:32px;max-height:none;max-width:155px}.institution-quote{font-size:13px;padding-left:18px}}
+@media print{.institution-strip{display:none!important}}
