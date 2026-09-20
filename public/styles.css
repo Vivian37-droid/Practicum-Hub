@@ -39,3 +39,15 @@ header{height:74px;backdrop-filter:blur(14px);background:#f8fbf9e8;padding:0 28p
 .toast-undo:hover{background:#ffffff38}
 #confirmReason{min-height:60px}
 button:disabled{opacity:.6;cursor:not-allowed}
+/* Prompt 7: report/programme-evidence traceability */
+.definitions{margin:8px 0 0;display:grid;gap:2px 14px}
+.definitions dt{font-weight:800;color:var(--navy2);margin-top:8px;font-size:12px}
+.definitions dd{margin:2px 0 0;color:var(--muted);font-size:12px;line-height:1.5}
+@media print{
+  aside,header,.actions,.no-print,#toast,#modal,.intern-context select,button{display:none!important}
+  #content{padding:0;max-width:none}
+  .card,.tablewrap{border:1px solid #999;box-shadow:none;break-inside:avoid}
+  body{background:#fff}
+  main{min-width:0}
+  .shell{display:block}
+}

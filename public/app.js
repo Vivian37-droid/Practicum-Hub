@@ -48,7 +48,7 @@ registerForm('fHoursEdit', e => saveHoursCorrection(e));
 registerForm('fSchedule', e => saveSchedule(e));
 registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData(e.target)); b.context_view = S.view; try { await api('feedback', { method: 'POST', body: JSON.stringify(b) }); toast('Feedback saved'); go('feedback'); } catch (x) { toast(x.message); } });
 
-let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '' };
+let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '', reportsMonth: null };
 
 // Per-role nav labels (unchanged wording from before Prompt 6) — now grouped
 // under NAV_GROUPS instead of rendered as one flat list, per Prompt 6's
@@ -136,6 +136,18 @@ const metric = (label, value, note = '') => `<div class="card metric"><label>${l
 const table = (headers, rows, empty = 'No records yet.') => `<div class="tablewrap"><table><thead><tr>${headers.map(x => `<th>${x}</th>`).join('')}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}">${empty}</td></tr>`}</tbody></table></div>`;
 const tag = s => `<span class="tag ${statusClass(s)}">${esc(s)}</span>`;
 const progressBar = (done, target) => `<div class="progress"><span style="width:${pc(done, target)}%"></span></div>`;
+function monthLabel(m) { const [y, mm] = String(m).slice(0, 7).split('-'); return new Date(Number(y), Number(mm) - 1, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' }); }
+// Prompt 7: "export to an appropriate format such as CSV" — built client-side
+// from the exact rows the page renders, so an export can never drift from
+// what's on screen. csvCell only quotes when a value actually needs it.
+function csvCell(v) { const s = String(v ?? ''); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function toCsv(rows) { return rows.map(row => row.map(csvCell).join(',')).join('\r\n'); }
+function downloadCsv(filename, csv) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 async function api(path, options = {}) {
   if (S.preview) return demoApi(path, options);
@@ -581,14 +593,48 @@ async function hours() {
 async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
 async function saveHoursCorrection(e) { if (e.target.id !== 'fHoursEdit') return; e.preventDefault(); try { await api('hours', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Activity entry corrected'); go('hours'); } catch (x) { toast(x.message); } }
 
+// Prompt 7: builds the CSV export from exactly the rows/fields the page
+// renders (never a separate recomputation), so an exported total can always
+// be reconciled against what's on screen and, from there, against the
+// source records the server derived it from.
+function buildReportCsv(internName, selectedMonth, s, hoursRows, corrections) {
+  const rows = [
+    ['Monthly report', `${internName || 'Intern'} — ${monthLabel(selectedMonth)}`],
+    [],
+    ['Metric', 'Value', 'Definition'],
+    ['Booked', s.booked || 0, 'Sessions scheduled this month'],
+    ['Attended', s.attended || 0, 'Of those, recorded as attended'],
+    ['Pending (booked, not yet attended)', Math.max(0, (s.booked || 0) - (s.attended || 0)), 'No attendance outcome recorded yet'],
+    ['Female', s.female || 0, 'Attended sessions, patient sex/gender recorded as Female'],
+    ['Male', s.male || 0, 'Attended sessions, patient sex/gender recorded as Male'],
+    ['Other', s.other_gender || 0, 'Attended sessions, patient sex/gender recorded as Other'],
+    ['Not recorded', s.not_recorded_gender || 0, 'Attended sessions where sex/gender was not captured'],
+    ['Intake sessions', s.intake_sessions || 0, ''],
+    ['Follow-up sessions', s.follow_up_sessions || 0, ''],
+    ['Termination sessions', s.termination_sessions || 0, ''],
+    ['Counselling minutes (attended)', s.counselling_minutes || 0, ''],
+    [],
+    ['Formal requirement', 'Total hours', 'From attended sessions', 'Logged manually']
+  ];
+  hoursRows.forEach(x => rows.push([x.name, x.total, x.encounter_hours || 0, x.manual_hours || 0]));
+  rows.push([]);
+  rows.push(['Corrections this period', corrections.length]);
+  corrections.forEach(c => rows.push([`Entry #${c.entity_id}`, c.reason || '', c.created_at || '']));
+  return toCsv(rows);
+}
 async function reports() {
   const switcherHtml = await internSwitcherHtml();
   if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), isIntern = S.session.role === 'intern';
   const institution = isIntern ? S.session.profile.institution : S.intern?.institution;
   const internName = isIntern ? S.session.profile.display_name : S.intern?.display_name;
-  const data = await api(`reports?intern_id=${id}&month=${month()}-01`), s = data.stats || {};
-  const refreshedAt = new Date().toLocaleString();
+  // Prompt 7: "explicit intern and reporting-period selectors" — the intern
+  // switcher above already covers the intern; S.reportsMonth (defaulting to
+  // the current month) covers the period, and the <input type=month> below
+  // lets it be changed without ever mixing months in one request.
+  const selectedMonth = S.reportsMonth || month();
+  const data = await api(`reports?intern_id=${id}&month=${selectedMonth}-01`), s = data.stats || {};
+  const refreshedAt = data.refreshed_at ? new Date(data.refreshed_at).toLocaleString() : new Date().toLocaleString();
   const alreadyReviewed = data.report.status === 'Reviewed';
   const reviewLine = alreadyReviewed
     ? `Reviewed by ${esc(data.report.reviewed_by_name || 'unknown reviewer')}${data.report.reviewed_at ? ' on ' + esc(new Date(data.report.reviewed_at).toLocaleString()) : ''}`
@@ -599,17 +645,67 @@ async function reports() {
   // comment (the server no longer re-stamps reviewer/time, see 0007), so the
   // button says so instead of implying a second "Mark reviewed" action.
   const reviewBtnLabel = isIntern ? 'Submit report' : (alreadyReviewed ? 'Update comment' : 'Mark reviewed');
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'My monthly report' : 'Monthly report'} · ${esc(internName || '')}</h3><p>${esc(institution || 'Institution not set')} · ${month()}</p></div><span class="tag">${esc(data.report.status)}</span></div>
+  const attendanceRate = s.booked ? Math.round((s.attended || 0) / s.booked * 100) : null;
+  const pending = Math.max(0, (s.booked || 0) - (s.attended || 0));
+
+  // Prompt 7: "data provenance showing whether hours came from attended
+  // sessions, manually logged activity, imported opening balances or
+  // another source" — range_requirement_hours (0008) now returns that
+  // split, so it's shown per requirement instead of one opaque total.
+  const hoursRows = (data.hours || []).map(x => {
+    const parts = [];
+    if (x.encounter_hours) parts.push(`${fmt(x.encounter_hours)} h from attended sessions`);
+    if (x.manual_hours) parts.push(`${fmt(x.manual_hours)} h logged manually`);
+    return `<div class="row"><div class="grow"><b>${esc(x.name)}</b>${parts.length ? `<br><small class="muted">${parts.join(' + ')}</small>` : ''}</div><b>${fmt(x.total)} h</b></div>`;
+  }).join('') || 'No hours recorded this period.';
+
+  // Prompt 7: "separation of verified, pending and corrected figures" —
+  // attended sessions are verified (they happened and were recorded);
+  // booked-not-yet-attended is pending; anything corrected after the fact
+  // (Prompt 4's hours-correction audit trail) is called out by name rather
+  // than folded silently back into the total.
+  const corrections = data.corrections || [];
+  const correctionsHtml = corrections.length
+    ? corrections.map(c => `<div class="row"><div class="grow">Activity entry #${esc(c.entity_id)} was corrected</div><small class="muted">${esc(c.reason || 'No reason recorded')} · ${esc(new Date(c.created_at).toLocaleDateString())}</small></div>`).join('')
+    : 'No corrections recorded this period — the figures above are as originally entered.';
+
+  const trend = data.trend || [];
+  const trendMonthsWithData = trend.filter(t => t.booked || t.attended || t.hours).length;
+  const trendHtml = trendMonthsWithData >= 2
+    ? `<div class="tablewrap"><table><thead><tr><th>Month</th><th>Booked</th><th>Attended</th><th>Hours logged</th></tr></thead><tbody>${trend.map(t => `<tr><td>${esc(monthLabel(t.month))}</td><td>${t.booked}</td><td>${t.attended}</td><td>${fmt(t.hours)} h</td></tr>`).join('')}</tbody></table></div>`
+    : `<p class="muted">Not enough history yet for a trend — at least two months of activity are needed.</p>`;
+
+  const reviewHistoryHtml = (data.review_history || []).length
+    ? data.review_history.map(h => `<div class="row"><div class="grow">${h.action === 'review' ? 'Marked reviewed' : 'Submitted'}${h.reason ? ` — ${esc(h.reason)}` : ''}</div><small class="muted">${esc(new Date(h.created_at).toLocaleString())}</small></div>`).join('')
+    : 'No review history yet.';
+
+  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>${isIntern ? 'My monthly report' : 'Monthly report'} · ${esc(internName || '')}</h3><p>${esc(institution || 'Institution not set')} · ${esc(monthLabel(selectedMonth))}</p></div><span class="tag">${esc(data.report.status)}</span></div>
+    <div class="card" style="margin-bottom:14px"><label style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="muted" style="font-size:11px;text-transform:uppercase;font-weight:800">Reporting period</span><input id="reportMonth" type="month" value="${esc(selectedMonth)}" max="${month()}"></label></div>
     <div class="notice info" style="margin-top:-4px;margin-bottom:14px">${reviewLine} · data refreshed ${esc(refreshedAt)}</div>
-    <div class="grid metrics">${metric('Booked', s.booked || 0)}${metric('Attended', s.attended || 0)}${metric('Female', s.female || 0)}${metric('Male', s.male || 0)}</div>
+    <div class="grid metrics">${metric('Booked', s.booked || 0)}${metric('Attended', s.attended || 0)}${metric('Attendance rate', attendanceRate == null ? '—' : attendanceRate + '%', attendanceRate == null ? 'No sessions booked yet' : `${s.attended || 0} / ${s.booked || 0} booked`)}${metric('Pending', pending, 'booked, not yet attended')}</div>
+    <div class="grid metrics" style="margin-top:14px">${metric('Female', s.female || 0)}${metric('Male', s.male || 0)}${metric('Other', s.other_gender || 0)}${metric('Not recorded', s.not_recorded_gender || 0)}</div>
     <div class="grid metrics" style="margin-top:14px">${metric('Intake', s.intake_sessions || 0)}${metric('Follow-ups', s.follow_up_sessions || 0)}${metric('Terminations', s.termination_sessions || 0)}${metric('Counselling time', fmt((s.counselling_minutes || 0) / 60) + ' h')}</div>
-    <div class="section"><h3>Formal requirement hours this month</h3></div><div class="card list">${data.hours.map(x => `<div class="row"><div class="grow">${esc(x.name)}</div><b>${fmt(x.total)} h</b></div>`).join('') || 'No hours recorded.'}</div>
-    <div class="section"><h3>${isIntern ? 'Submission' : 'Supervisor review'}</h3></div><div class="card field"><label>${isIntern ? 'Reflection / notable activity' : 'Supervisor comment'}<textarea id="comment">${esc(isIntern ? data.report.intern_comment || '' : data.report.supervisor_comment || '')}</textarea></label><button id="sendReport" class="btn primary">${reviewBtnLabel}</button></div>`;
+    <details class="card" style="margin-top:14px"><summary style="cursor:pointer;font-weight:800">What these numbers mean</summary><dl class="definitions">
+      <dt>Booked / Attended / Pending</dt><dd>Booked = sessions scheduled this month. Attended = of those, recorded as having happened. Pending = booked with no attendance outcome recorded yet — not a failure, just not yet confirmed.</dd>
+      <dt>Female / Male / Other / Not recorded</dt><dd>The patient's sex/gender for each attended session, as entered by the intern at the time. "Not recorded" means the field was left blank — it is not assumed to be any category. This is the Hub's own internal categorisation for service-planning visibility, not a government-mandated reporting schema.</dd>
+      <dt>Intake / Follow-up / Termination</dt><dd>The session type recorded for each attended encounter.</dd>
+      <dt>Formal requirement hours</dt><dd>Hours credited toward each formal category this month, split by source (attended sessions vs. manually logged activity) so the total is traceable back to what was actually recorded.</dd>
+    </dl></details>
+    <div class="section"><div><h3>Formal requirement hours this month</h3><p>Split by source. Any opening-balance hours were a one-time carry-over at placement start and are not part of this or any other single month.</p></div></div><div class="card list">${hoursRows}</div>
+    <div class="grid two" style="margin-top:14px">
+      <div><div class="section tight"><h3>Corrected this period</h3></div><div class="card list">${correctionsHtml}</div></div>
+      <div><div class="section tight"><h3>Review history</h3></div><div class="card list">${reviewHistoryHtml}</div></div>
+    </div>
+    <div class="section"><h3>Trend (last 6 months)</h3></div><div class="card">${trendHtml}</div>
+    <div class="section"><h3>${isIntern ? 'Submission' : 'Supervisor review'}</h3></div><div class="card field"><label>${isIntern ? 'Reflection / notable activity' : 'Supervisor comment'}<textarea id="comment">${esc(isIntern ? data.report.intern_comment || '' : data.report.supervisor_comment || '')}</textarea></label><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px" class="no-print"><button id="sendReport" class="btn primary">${reviewBtnLabel}</button><button id="exportCsv" class="btn" type="button">Export CSV</button><button id="printReport" class="btn" type="button">Print / Save as PDF</button></div></div>`;
   bindInternSwitcher();
+  $('#reportMonth').onchange = e => { S.reportsMonth = e.target.value; go('reports'); };
+  $('#exportCsv').onclick = () => downloadCsv(`report-${(internName || 'intern').replace(/\s+/g, '_')}-${selectedMonth}.csv`, buildReportCsv(internName, selectedMonth, s, data.hours || [], corrections));
+  $('#printReport').onclick = () => window.print();
   const submitReport = async () => {
     const btn = $('#sendReport'); if (btn.disabled) return; btn.disabled = true; const original = btn.textContent; btn.textContent = 'Saving…';
     try {
-      const body = { intern_profile_id: id, month: month() + '-01' }; body[isIntern ? 'intern_comment' : 'supervisor_comment'] = $('#comment').value;
+      const body = { intern_profile_id: id, month: selectedMonth + '-01' }; body[isIntern ? 'intern_comment' : 'supervisor_comment'] = $('#comment').value;
       const result = await api('reports', { method: 'POST', body: JSON.stringify(body) });
       toast(isIntern ? 'Report submitted' : (result.already_reviewed ? `Comment updated — already reviewed by ${result.reviewed_by_name || 'a reviewer'}` : 'Report marked reviewed'));
       go('reports');
@@ -618,7 +714,7 @@ async function reports() {
   $('#sendReport').onclick = () => {
     if (!activeId()) { toast('No intern selected — cannot submit or review this report.'); return; }
     if (!isIntern && !alreadyReviewed) {
-      confirmModal('Mark this report reviewed?', `This records you as the reviewer with today’s timestamp — that identity and time cannot be reassigned to someone else afterwards. ${esc(internName || 'This intern')}’s ${month()} report will be marked Reviewed.`, async () => { closeModal(); await submitReport(); }, { confirmLabel: 'Mark reviewed', danger: false });
+      confirmModal('Mark this report reviewed?', `This records you as the reviewer with today’s timestamp — that identity and time cannot be reassigned to someone else afterwards. ${esc(internName || 'This intern')}’s ${esc(monthLabel(selectedMonth))} report will be marked Reviewed.`, async () => { closeModal(); await submitReport(); }, { confirmLabel: 'Mark reviewed', danger: false });
     } else {
       submitReport();
     }
@@ -694,13 +790,47 @@ async function answerQuestion(query, id) {
   $('#askSupervision')?.addEventListener('click', () => supervisionModal(id, { topic: 'Practicum Assistant question', question: query }));
 }
 
+// Prompt 7: programme_metrics() mixes an all-time snapshot (interns, hours,
+// cases) with one current-month figure (reviewed_reports) — rather than
+// build a full historical period-selector for aggregate SQL this codebase
+// deliberately keeps simple (see range_requirement_hours' own comments on
+// not touching working pace math casually), each metric here says exactly
+// which of those two it is, so nobody reads an all-time total as "this
+// month" or vice versa.
 async function programme() {
   const d = await api('programme'), m = d.metrics;
+  const refreshedAt = d.refreshed_at ? new Date(d.refreshed_at).toLocaleString() : new Date().toLocaleString();
   $('#content').innerHTML = `<div class="hero"><h1>Evidence accumulates while the programme runs.</h1><p>Access, attendance, requirement completion and supervision demand become programme evidence without rebuilding the story retrospectively.</p></div>
-    <div class="grid metrics">${metric('Active interns', m.interns)}${metric('Formal hours logged', fmt(m.hours))}${metric('Interns with target risk', m.at_risk_interns)}${metric('Attendance rate', m.attendance_rate == null ? '—' : m.attendance_rate + '%', `${m.attended || 0} / ${m.booked || 0}`)}</div>
+    <div class="notice info" style="margin-top:14px">Snapshot refreshed ${esc(refreshedAt)}. Figures below are all-time totals unless marked "this month".</div>
+    <div class="grid metrics" style="margin-top:14px">${metric('Active interns', m.interns, 'all-time, currently active placements')}${metric('Formal hours logged', fmt(m.hours), 'all-time')}${metric('Interns with target risk', m.at_risk_interns, 'as of now')}${metric('Attendance rate', m.attendance_rate == null ? '—' : m.attendance_rate + '%', `${m.attended || 0} / ${m.booked || 0} booked, all-time`)}</div>
     <div class="grid two" style="margin-top:14px"><div><div class="section"><h3>Service footprint</h3></div><div class="card list">${d.sites.map(x => `<div class="row"><div class="grow">${esc(x.site)}</div><b>${x.cases}</b></div>`).join('') || 'No case data yet.'}</div></div><div><div class="section"><h3>Institution mix</h3></div><div class="card list">${d.institutions.map(x => `<div class="row"><div class="grow">${esc(x.institution)}</div><b>${x.count}</b></div>`).join('')}</div></div></div>
-    <div class="section"><h3>Training & governance</h3></div><div class="grid three">${metric('Open supervision', m.open_supervision)}${metric('Reports reviewed', m.reviewed_reports, 'current month')}${metric('Median allocation → intake', m.median_days_to_intake == null ? '—' : Number(m.median_days_to_intake).toFixed(1) + ' d')}</div>
-    <div class="notice info" style="margin-top:14px">Patient outcomes are deliberately not claimed yet. Add them only after agreeing a defensible outcome measure.</div>`;
+    <div class="section"><h3>Training & governance</h3></div><div class="grid three">${metric('Open supervision', m.open_supervision, 'as of now')}${metric('Reports reviewed', m.reviewed_reports, 'this calendar month')}${metric('Median allocation → intake', m.median_days_to_intake == null ? '—' : Number(m.median_days_to_intake).toFixed(1) + ' d', 'all-time, where intake has occurred')}</div>
+    <details class="card" style="margin-top:14px"><summary style="cursor:pointer;font-weight:800">What these numbers mean</summary><dl class="definitions">
+      <dt>Attendance rate</dt><dd>Attended sessions ÷ booked sessions, all-time across every active intern. The denominator (booked) is always shown alongside it.</dd>
+      <dt>Interns with target risk</dt><dd>Interns whose Requirements & Pace page currently flags at least one formal category as "Target at risk".</dd>
+      <dt>Median allocation → intake</dt><dd>The middle value (not average) of days between a case being allocated and its intake session, across cases that have reached intake. Half of cases reach intake faster than this, half slower.</dd>
+    </dl></details>
+    <div class="notice info" style="margin-top:14px">Patient outcomes are deliberately not claimed yet. Add them only after agreeing a defensible, approved outcome measure.</div>
+    <div class="actions" style="margin-top:14px"><button id="exportProgramme" class="btn">Export CSV</button><button id="printProgramme" class="btn">Print / Save as PDF</button></div>`;
+  $('#exportProgramme').onclick = () => downloadCsv(`programme-evidence-${today()}.csv`, toCsv([
+    ['Programme evidence snapshot', refreshedAt],
+    [],
+    ['Metric', 'Value', 'Period'],
+    ['Active interns', m.interns, 'all-time'],
+    ['Formal hours logged', m.hours, 'all-time'],
+    ['Interns with target risk', m.at_risk_interns, 'as of now'],
+    ['Attendance rate (%)', m.attendance_rate ?? '', 'all-time'],
+    ['Attended', m.attended || 0, 'all-time'],
+    ['Booked', m.booked || 0, 'all-time'],
+    ['Open supervision', m.open_supervision, 'as of now'],
+    ['Reports reviewed', m.reviewed_reports, 'this calendar month'],
+    ['Median allocation to intake (days)', m.median_days_to_intake ?? '', 'all-time'],
+    [],
+    ['Site', 'Cases'], ...d.sites.map(x => [x.site, x.cases]),
+    [],
+    ['Institution', 'Interns'], ...d.institutions.map(x => [x.institution, x.count])
+  ]));
+  $('#printProgramme').onclick = () => window.print();
 }
 
 function handbook() {
@@ -772,11 +902,24 @@ async function demoApi(path, options = {}) {
   if(route==='hours-feed')return Object.entries(d.hours).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
   if(route==='competencies'){const defs=['Intake interviewing','Mental State Examination','Risk assessment','Case formulation','Short-term counselling','Documentation','Referral & MDT work','Professional conduct','Group / community work'];if(method==='GET')return defs.map((name,i)=>({id:i+1,name,description:'Developmental competency',...(d.comp[id]?.[i+1]||{})}));d.comp[id]||={};d.comp[id][body.competency_id]={...(d.comp[id][body.competency_id]||{}),...body};return body;}
   if(route==='hours'){if(method==='GET'){const req=demoRequirement(id);return{entries:d.hours[id]||[],components:req.components.filter(x=>['manual','manual_plus_individual_encounters'].includes(x.calculation_mode))};}(d.hours[id]||=[]).unshift({...body,hours:+body.hours,component_name:demoRequirement(id).components.find(x=>x.code===body.component_code)?.name||body.component_code});return body;}
-  if(route==='reports'){if(method==='GET')return{report:d.report[id]||{status:'Draft'},hours:[],stats:{booked:0,attended:0,female:0,male:0,intake_sessions:0,follow_up_sessions:0,termination_sessions:0,counselling_minutes:0}};d.report[id]={...body,status:S.session.role==='intern'?'Submitted':'Reviewed'};return d.report[id];}
+  if(route==='reports'){
+    if(method==='GET')return{
+      report:d.report[id]||{status:'Draft'},
+      hours:[{code:'counselling',name:'Counselling of children, adolescents & adults',total:11.5,encounter_hours:10.5,manual_hours:1}],
+      stats:{booked:12,attended:10,female:6,male:3,other_gender:1,not_recorded_gender:0,intake_sessions:2,follow_up_sessions:7,termination_sessions:1,counselling_minutes:630},
+      corrections:[],
+      trend:[{month:'2026-07-01',booked:9,attended:8,hours:9.5},{month:'2026-08-01',booked:11,attended:9,hours:10.8},{month:'2026-09-01',booked:12,attended:10,hours:11.5}],
+      review_history:d.report[id]?.status==='Reviewed'?[{action:'review',reason:null,created_at:new Date().toISOString(),detail:'{}'}]:[],
+      refreshed_at:new Date().toISOString()
+    };
+    const already=d.report[id]?.status==='Reviewed';
+    d.report[id]={...d.report[id],...body,status:S.session.role==='intern'?'Submitted':'Reviewed',reviewed_by_name:S.session.role==='intern'?d.report[id]?.reviewed_by_name:S.session.profile.display_name,reviewed_at:S.session.role==='intern'?d.report[id]?.reviewed_at:new Date().toISOString()};
+    return {...d.report[id],already_reviewed:already};
+  }
   if(route==='programme')return demoProgramme(d);
   throw Error('Preview route not implemented');
 }
-function demoProgramme(d){const atRiskInterns=demoRequirement(11).summary.at_risk_components>0?1:0;return{metrics:{interns:1,cases:0,active_cases:0,hours:470.5,at_risk_interns:atRiskInterns,open_supervision:0,reviewed_reports:0,booked:0,attended:0,attendance_rate:null,median_days_to_intake:null},sites:[],institutions:[{institution:'SACAP',count:1}]};}
+function demoProgramme(d){const atRiskInterns=demoRequirement(11).summary.at_risk_components>0?1:0;return{metrics:{interns:1,cases:0,active_cases:0,hours:470.5,at_risk_interns:atRiskInterns,open_supervision:0,reviewed_reports:0,booked:12,attended:10,attendance_rate:83,median_days_to_intake:4.5},sites:[{site:'Stellenbosch Hospital',cases:3}],institutions:[{institution:'SACAP',count:1}],refreshed_at:new Date().toISOString()};}
 async function preview(role){S.preview=true;S.data=demo();const profile=role==='intern'?{id:11,display_name:'Erin George'}:{id:1,display_name:role==='management'?'Programme Viewer':'Vivian Leibrandt'};S.session={profile,role};restoreActiveIntern();shell();}
 let pendingAuthType=null;
 function authError(message){$('#authErr').classList.remove('hidden');$('#authErr').textContent=message;}
