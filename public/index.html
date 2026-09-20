@@ -41,8 +41,9 @@
 </section>
 
 <div id="app" class="shell hidden">
+  <div id="navBackdrop" class="nav-backdrop"></div>
   <aside id="sidebar">
-    <div class="sidebrand"><div class="brand">RC</div><div><b>Practicum Hub</b><small>Stellenbosch Subdistrict</small></div></div>
+    <div class="sidebrand"><div class="brand">RC</div><div><b>Practicum Hub</b><small>Stellenbosch Subdistrict</small></div><button id="navClose" class="nav-close" aria-label="Close navigation menu">✕</button></div>
     <nav id="nav" aria-label="Main navigation"></nav>
     <div class="partner-mini"><span>Programme partners</span><div><img src="https://www.sacap.edu.za/wp-content/themes/greenbox/svg/sacap.svg" alt="SACAP"><img src="https://cornerstone.ac.za/wp-content/smush-webp/2021/09/cornerstone-logo.652f4c98.png.webp" alt="Cornerstone Institute"></div></div>
     <div class="foot"><div id="me"></div><button id="logout" class="link">Sign out</button></div>
@@ -53,7 +54,7 @@
       <div><small id="role"></small><h1 id="title">Dashboard</h1></div>
       <span></span>
       <button id="quickHelp" class="help-pill">Help / I’m stuck</button>
-      <button id="emergency" class="red">Emergency guide</button>
+      <button id="emergency" class="red" aria-label="Open emergency guide">⚠ Emergency</button>
     </header>
     <div class="institution-strip" aria-label="Programme organisations">
       <a href="https://www.westerncape.gov.za/" target="_blank" rel="noopener"><img src="https://www.westerncape.gov.za/themes/custom/wcg2023/images/logo.svg" alt="Western Cape Government"></a>
