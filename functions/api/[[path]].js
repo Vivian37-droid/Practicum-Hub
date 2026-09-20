@@ -32,6 +32,7 @@ export async function onRequest({ request, env }) {
     if (path === 'referrals') return json(await h.referrals(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'pilot-context') return json(await h.pilotContext(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'feedback') return json(await h.feedback(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
+    if (path === 'audit-restore') return json(await h.restoreAudit(ctx, env, url, body, method), 201);
     if (path === 'programme') return json(await h.programme(ctx, env));
     throw new HttpError(404, 'Not found');
   } catch (error) {

@@ -36,6 +36,14 @@ export async function context(request, env) {
     p_role: role
   }));
 
+  // Prompt 4: deactivating an intern (soft-delete, profiles.active = false)
+  // must actually cut off their access, not just hide them from lists — an
+  // intern whose placement was removed can still hold a valid Supabase Auth
+  // session otherwise.
+  if (role === 'intern' && profile.active === false) {
+    throw new HttpError(403, 'This placement has been deactivated. Contact your programme lead.');
+  }
+
   return { user, profile, role };
 }
 
@@ -66,17 +74,21 @@ export async function assertInternAccess(ctx, id, env) {
   if (!(await canAccessIntern(ctx, id, env))) throw new HttpError(403, 'You cannot access this intern record');
 }
 
-export async function audit(ctx, env, action, entityType, entityId, detail, profileId) {
+// Returns the new audit_log row's id so callers can offer an undo (see
+// restoreAudit in _handlers.js) or otherwise reference this exact entry.
+export async function audit(ctx, env, action, entityType, entityId, detail, profileId, reason = null) {
   const admin = getAdmin(env);
-  const { error } = await admin.from('audit_log').insert({
+  const { data, error } = await admin.from('audit_log').insert({
     identity_user_id: ctx.user.id,
     profile_id: profileId || ctx.profile.id,
     action,
     entity_type: entityType,
     entity_id: entityId ? String(entityId) : null,
-    detail: detail ? JSON.stringify(detail) : null
-  });
+    detail: detail ? JSON.stringify(detail) : null,
+    reason: reason || null
+  }).select('id').single();
   if (error) throw new HttpError(500, error.message);
+  return data.id;
 }
 
 export async function ensureRequirementProfile(env, profile) {

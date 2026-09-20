@@ -579,4 +579,10 @@ const sections = [
 
 const catOrder=["orientation","clinical","documentation","conduct","supervision"];
 const catNames={orientation:"Orientation",clinical:"Clinical practice",documentation:"Documentation",conduct:"Professional conduct",supervision:"Supervision & theory"};
-window.HANDBOOK={sections,catOrder,catNames};
+// Prompt 8: "add document version, content owner, approval date and review
+// date." version reflects this content's own revision history; the other
+// three are governance decisions this file can't invent on its own, so
+// they stay null (and the Hub says so plainly) until the programme lead
+// and clinical owner actually set them.
+const meta={version:"1.0",contentOwner:null,approvedDate:null,reviewDate:null};
+window.HANDBOOK={sections,catOrder,catNames,meta};
