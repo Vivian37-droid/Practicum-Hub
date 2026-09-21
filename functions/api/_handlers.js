@@ -45,9 +45,21 @@ function sortReferrals(rows) {
   return rows.sort((a, b) => new Date(b.next_action_date || b.referral_date) - new Date(a.next_action_date || a.referral_date));
 }
 
-const ACTIVITY_SERVICE_TYPES = new Set(['Group counselling', 'Family counselling', 'Other activity']);
+const ACTIVITY_SERVICE_TYPES = new Set([
+  'Individual counselling',
+  'Group counselling',
+  'Family counselling',
+  'Community talk / psychoeducation',
+  'Public health / advocacy',
+  'Preparation / documentation',
+  'Training',
+  'Supervision',
+  'Psychological assessment',
+  'Ethical / professional activity',
+  'Other professional activity'
+]);
 function activityServiceType(value) {
-  const result = value || 'Other activity';
+  const result = value || 'Other professional activity';
   if (!ACTIVITY_SERVICE_TYPES.has(result)) throw new HttpError(400, 'Choose a valid activity type');
   return result;
 }
