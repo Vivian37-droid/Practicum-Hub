@@ -1180,7 +1180,8 @@ async function finishLogin(){const b=await api('bootstrap');S.session={profile:b
 // creation and establishes a (temporary, for invite/recovery) session
 // automatically, then fires onAuthStateChange with the matching event.
 async function init(){
-  const qp=new URLSearchParams(location.search),pr=window.__AUTO_PREVIEW__||qp.get('preview'),allowed=location.hostname==='localhost'||location.hostname==='127.0.0.1'||pr!==null;
+  const qp=new URLSearchParams(location.search),isLocal=location.hostname==='localhost'||location.hostname==='127.0.0.1',pr=isLocal?(window.__AUTO_PREVIEW__||qp.get('preview')):null,allowed=isLocal;
+  if(!isLocal&&qp.has('preview')){qp.delete('preview');const clean=location.pathname+(qp.toString()?`?${qp}`:'')+location.hash;history.replaceState(null,'',clean);}
   if(allowed){$('#preview').classList.remove('hidden');$$('[data-preview]').forEach(b=>b.onclick=()=>preview(b.dataset.preview));}
   if(['programme_lead','intern','management'].includes(pr))return preview(pr);
   try{
