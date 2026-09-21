@@ -481,7 +481,7 @@ function demo() { return {
 async function demoApi(path, options = {}) {
   const d=S.data,[route,qs='']=path.split('?'),q=new URLSearchParams(qs),method=options.method||'GET',body=options.body?JSON.parse(options.body):{},id=+(q.get('intern_id')||(S.session.role==='intern'?11:S.intern?.id||0));
   d.referrals ||= [];
-  if(route==='dashboard'){if(S.session.role==='intern')return{metrics:{active_cases:0,open_supervision:0},requirements:demoRequirement(11)};if(S.session.role==='management')return demoProgramme(d);const interns=d.interns.map(x=>({...x,requirements:demoRequirement(x.id).summary,requirement_profile_name:demoRequirement(x.id).profile.requirement_profile_name}));const atRisk=interns.reduce((n,p)=>n+(p.requirements.at_risk_components>0?1:0),0);return{interns,metrics:{interns:1,active_cases:0,open_supervision:0,at_risk}};}
+  if(route==='dashboard'){if(S.session.role==='intern')return{metrics:{active_cases:0,open_supervision:0},requirements:demoRequirement(11)};if(S.session.role==='management')return demoProgramme(d);const interns=d.interns.map(x=>({...x,requirements:demoRequirement(x.id).summary,requirement_profile_name:demoRequirement(x.id).profile.requirement_profile_name}));const atRisk=interns.reduce((n,p)=>n+(p.requirements.at_risk_components>0?1:0),0);return{interns,metrics:{interns:1,active_cases:0,open_supervision:0,at_risk:atRisk}};}
   if(route==='interns')return d.interns.map(x=>({...x,requirement_summary:demoRequirement(x.id).summary}));
   if(route==='pilot-context')return {schedule:d.schedule[id]||[],planned:d.planned[id]||[]};
   if(route==='feedback'){if(method==='GET')return d.feedback[id]||[];(d.feedback[id]||=[]).unshift({...body,id:Date.now(),status:'New',created_at:new Date().toISOString()});return body;}
