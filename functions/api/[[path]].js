@@ -19,6 +19,7 @@ export async function onRequest({ request, env }) {
 
     if (path === 'bootstrap') return json({ profile: ctx.profile, role: ctx.role, dashboard: await h.dashboard(ctx, env) });
     if (path === 'dashboard') return json(await h.dashboard(ctx, env));
+    if (path === 'intern-overview') return json(await h.internOverview(ctx, env, url));
     if (path === 'interns') return json(await h.interns(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'requirements') return json(await h.requirements(ctx, env, url, body, method));
     if (path === 'cases') return json(await h.cases(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
@@ -30,6 +31,7 @@ export async function onRequest({ request, env }) {
     if (path === 'competencies') return json(await h.competencies(ctx, env, url, body, method));
     if (path === 'reports') return json(await h.reports(ctx, env, url, body, method));
     if (path === 'referrals') return json(await h.referrals(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
+    if (path === 'milestones') return json(await h.milestones(ctx, env, url, body, method));
     if (path === 'pilot-context') return json(await h.pilotContext(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'feedback') return json(await h.feedback(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'audit-restore') return json(await h.restoreAudit(ctx, env, url, body, method), 201);

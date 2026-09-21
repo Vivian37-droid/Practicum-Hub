@@ -19,10 +19,11 @@ unchanged; what changed is what it talks to:
 
 1. Create a project at supabase.com, **on the work account**, not personal
    (per REBUILD_SPEC.md §8.1 — keeps billing/usage attributable to work).
-2. In the SQL editor, run `supabase/migrations/0001_init.sql` once. This is
-   the entire schema plus the reference data (requirement profiles/
-   components, the 9 fixed competencies) from REBUILD_SPEC.md §6–§7. If you
-   use the Supabase CLI instead: `supabase link` then `supabase db push`.
+2. In the SQL editor, run every file in `supabase/migrations/` in numerical
+   order. Existing installations should run only the migrations that have
+   not yet been applied. Migration `0012_integrated_placement_workflow.sql`
+   links referrals to cases and creates placement milestones. If you use the
+   Supabase CLI instead: `supabase link` then `supabase db push`.
 3. Under **Authentication → Providers**, keep only Email enabled.
 4. Under **Authentication → URL Configuration**, set the Site URL to your
    Cloudflare Pages URL (or custom domain) once you have it — this is where
@@ -123,6 +124,12 @@ import script.
   immediately — no separate manual step in a different dashboard.
 - **Demo/preview mode is unchanged** (`?preview=intern|programme_lead|management`,
   or localhost) — still pure client-side fake data, no backend calls.
+- **Integrated operational workflow:** booked, intake-completed and active
+  referrals automatically create or update one linked case. The Programme
+  Lead dashboard adds acceptance, stale-case and milestone prompts; the
+  intern overview brings requirements, referrals, cases, supervision,
+  schedule and milestones together; and a read-only intern preview shows
+  the intern-facing placement summary without granting intern permissions.
 
 ## Architecture note: why `postgres` + Supabase Auth, not RLS + supabase-js everywhere
 

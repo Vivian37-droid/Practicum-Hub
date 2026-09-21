@@ -47,6 +47,7 @@ registerForm('fComp', e => saveComp(e));
 registerForm('fHours', e => saveHours(e));
 registerForm('fHoursEdit', e => saveHoursCorrection(e));
 registerForm('fSchedule', e => saveSchedule(e));
+registerForm('fMilestone', e => saveMilestone(e));
 registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData(e.target)); b.context_view = S.view; try { await api('feedback', { method: 'POST', body: JSON.stringify(b) }); toast('Feedback saved'); go('feedback'); } catch (x) { toast(x.message); } });
 
 let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '', reportsMonth: null };
@@ -57,8 +58,8 @@ let S = { identity: null, session: null, view: 'dashboard', intern: null, previe
 // appears in the sidebar for a role if it has a label here, so role
 // permissions are exactly as strict as before this refactor.
 const NAV_LABELS = {
-  programme_lead: { dashboard: 'Dashboard', interns: 'Interns', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
-  supervisor: { dashboard: 'Dashboard', interns: 'Assigned interns', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
+  programme_lead: { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
+  supervisor: { dashboard: 'Action Centre', interns: 'Assigned interns', overview: 'Intern overview', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
   intern: { dashboard: 'My placement', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
   management: { dashboard: 'Programme overview', programme: 'Programme evidence', handbook: 'Handbook' }
 };
@@ -69,10 +70,10 @@ const NAV_GROUPS = [
   ['Progress', ['progress', 'supervision', 'competencies']],
   ['Insights', ['dashboard', 'reports', 'programme']],
   ['Support', ['assistant', 'feedback', 'handbook']],
-  ['Administration', ['interns']]
+  ['Administration', ['interns', 'overview']]
 ];
 function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
-const titles = { dashboard: 'Dashboard', interns: 'Interns', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
+const titles = { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
 
 let toastTimer = null;
 // Prompt 4: "an undo or soft-delete approach where practical" — for
@@ -286,6 +287,7 @@ async function go(view, opts = {}) {
   try {
     if (view === 'dashboard') await dashboard();
     else if (view === 'interns') await interns();
+    else if (view === 'overview') await internOverviewView();
     else if (view === 'referrals') await referrals();
     else if (view === 'progress') await requirementsView();
     else if (view === 'cases') await cases();
@@ -437,7 +439,7 @@ async function dashboard() {
     ${queueCard(d.queue || [], d.interns || [])}
     <div class="grid metrics">${metric('Active interns', m.interns)}${metric('Interns with target risk', m.at_risk)}${metric('Active cases', m.active_cases)}${metric('Open supervision', m.open_supervision)}</div>
     <div class="section"><div><h3>Placement pace</h3><p>Click an intern to open their requirement profile.</p></div></div>${table(['Intern', 'Formal hours', 'Weeks left', 'Clinical pace needed', 'Cases', 'Requirements', 'Supervision'], rows)}`;
-  $$('[data-open]').forEach(btn => btn.onclick = () => { setActiveIntern(d.interns.find(i => i.id == btn.dataset.open)); go('progress'); });
+  $$('[data-open]').forEach(btn => btn.onclick = () => { setActiveIntern(d.interns.find(i => i.id == btn.dataset.open)); go('overview'); });
   bindQueue(d.queue || [], d.interns || []);
   bindGo();
 }
@@ -486,7 +488,7 @@ async function interns() {
   $('#content').innerHTML = `<div class="section"><div><h2>Intern placements</h2><p>Institution determines the verified requirement profile automatically.</p></div>${S.session.role === 'programme_lead' ? '<button id="addIntern" class="btn primary">Add intern</button>' : ''}</div>
     ${table(['Intern', 'Institution', 'Progress', 'Weeks left', 'Pace', 'Cases', 'Account', ...(isAdmin ? ['Admin'] : [])], rows)}
     <div class="notice info" style="margin-top:12px"><b>Account setup:</b> Adding a new intern automatically sends them a Supabase sign-in invitation by email. SACAP and Cornerstone use different formal hour categories, and the Hub loads the selected profile automatically.</div>`;
-  $$('[data-open]').forEach(btn => btn.onclick = () => { setActiveIntern(data.find(i => i.id == btn.dataset.open)); go('progress'); });
+  $$('[data-open]').forEach(btn => btn.onclick = () => { setActiveIntern(data.find(i => i.id == btn.dataset.open)); go('overview'); });
   $$('[data-resend-invite]').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
     confirmModal(`Resend the invitation to ${esc(b.dataset.name)}?`, `${esc(b.dataset.name)} will receive a new sign-in invitation email. This is safe — it does nothing if they've already accepted and signed in.`, async () => {
@@ -520,6 +522,48 @@ async function interns() {
 }
 async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { const created = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); setActiveIntern(created); closeModal(); toast(created.invite?.sent ? 'Placement created · invite email sent' : created.invite && !created.invite.sent ? `Placement created, but the invite email failed: ${created.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
 async function purgeIntern(e) { if (e.target.id !== 'fPurgeIntern') return; e.preventDefault(); try { await api('interns', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); clearActiveIntern(); closeModal(); toast('Test intern and linked records permanently deleted'); go('interns'); } catch (x) { toast(x.message); } }
+
+function internPreviewMarkup(d) {
+  const req = d.requirements;
+  const activeCases = d.cases.filter(x => x.status !== 'Exited').length;
+  const openSupervision = d.supervision.filter(x => x.status === 'Open').length;
+  const outstandingMilestones = d.milestones.filter(x => !['Complete','Not applicable'].includes(x.status)).length;
+  return `<div class="notice info preview-banner"><b>Read-only intern preview:</b> This is the placement information ${esc(d.profile.display_name)} sees. No changes can be made from this preview. <button id="exitInternPreview" class="btn small">Return to Programme Lead view</button></div>
+    <div class="hero"><small>${esc(req.profile.requirement_profile_name || d.profile.institution || 'Placement')}</small><h2>Welcome, ${esc(d.profile.display_name)}.</h2><p>Your handbook, weekly plan, live requirements, supervision preparation and help when you are stuck — in one place.</p></div>
+    ${requirementSummaryCard(req)}
+    <div class="grid two" style="margin-top:14px">${weeklyScheduleCard(d.schedule)}${clinicalPaceCard(req)}</div>
+    <div class="card" style="margin-top:14px"><h3>Current workload</h3><div class="mini-grid"><div><small>Active cases</small><b>${activeCases}</b></div><div><small>Open supervision items</small><b>${openSupervision}</b></div><div><small>Placement milestones outstanding</small><b>${outstandingMilestones}</b></div><div><small>Expected attended sessions</small><b>${fmt(req.summary.expected_attended_sessions)}/wk</b></div></div></div>`;
+}
+
+async function internOverviewView() {
+  const switcherHtml = await internSwitcherHtml();
+  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
+  const id = activeId();
+  const d = await api(`intern-overview?intern_id=${id}`);
+  const activeCases = d.cases.filter(x => x.status !== 'Exited');
+  const openReferrals = d.referrals.filter(x => !String(x.status).startsWith('Closed'));
+  const overdueRefs = openReferrals.filter(x => referralDaysOverdue(x) > 0);
+  const openSupervision = d.supervision.filter(x => x.status === 'Open');
+  const completeMilestones = d.milestones.filter(x => x.status === 'Complete').length;
+  const referralRows = openReferrals.slice(0, 6).map(x => `<tr><td><b>${esc(x.referral_code)}</b></td><td>${tag(x.status)}</td><td>${esc(x.site || '—')}</td><td>${x.next_action_date ? esc(x.next_action_date) : '—'}</td></tr>`).join('');
+  const caseRows = activeCases.slice(0, 6).map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${tag(x.status)}</td><td>${esc(x.site || '—')}</td><td>${x.sessions || 0}</td></tr>`).join('');
+  const milestoneRows = d.milestones.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${x.due_date ? esc(x.due_date) : '—'}</td><td>${tag(x.status)}</td><td><button class="btn small" data-milestone="${x.id}">Update</button></td></tr>`).join('');
+  $('#content').innerHTML = switcherHtml + `<div class="hero"><small>${esc(d.profile.institution || 'Placement')}</small><h2>${esc(d.profile.display_name)} · complete placement view</h2><p>Account, referrals, cases, supervision, requirements and milestones in one operational view.</p><div class="actions"><button id="viewAsIntern" class="btn">View as ${esc(d.profile.display_name)}</button><button class="btn" data-go="supervision">Open supervision</button><button class="btn" data-go="progress">Review requirements</button></div></div>
+    <div class="grid metrics">${metric('Open referrals', openReferrals.length, `${overdueRefs.length} overdue`)}${metric('Active cases', activeCases.length)}${metric('Open supervision', openSupervision.length)}${metric('Milestones', `${completeMilestones}/${d.milestones.length}`, 'completed')}</div>
+    ${requirementSummaryCard(d.requirements)}
+    <div class="grid two" style="margin-top:14px">${weeklyScheduleCard(d.schedule)}${clinicalPaceCard(d.requirements)}</div>
+    <div class="section"><div><h3>Current referral journey</h3><p>Booked and intake-completed referrals flow automatically into Case Workflow.</p></div><button class="btn" data-go="referrals">Open all referrals</button></div>${table(['Code','Stage','Facility','Next action'], referralRows, 'No open referrals.')}
+    <div class="section"><div><h3>Active cases</h3><p>Linked to their originating referral wherever applicable.</p></div><button class="btn" data-go="cases">Open Case Workflow</button></div>${table(['Code','Status','Facility','Sessions'], caseRows, 'No active cases.')}
+    <div class="section"><div><h3>Placement milestones</h3><p>Orientation, evaluations, competencies, logbook verification and exit requirements.</p></div></div>${table(['Milestone','Due','Status',''], milestoneRows, 'No milestones configured.')}`;
+  bindInternSwitcher(); bindGo();
+  $('#viewAsIntern').onclick = () => { $('#content').innerHTML = internPreviewMarkup(d); $('#exitInternPreview').onclick = () => go('overview'); };
+  $$('[data-milestone]').forEach(b => b.onclick = () => milestoneModal(d.milestones.find(x => x.id == b.dataset.milestone), id));
+}
+
+function milestoneModal(x, internId) {
+  modal('Update placement milestone', `<form id="fMilestone" class="formgrid"><input type="hidden" name="id" value="${x.id}"><input type="hidden" name="intern_profile_id" value="${internId}"><div class="full"><b>${esc(x.title)}</b></div><div class="field"><label>Status<select name="status">${['Not started','In progress','Complete','Not applicable'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div><div class="field"><label>Due date<input name="due_date" type="date" value="${esc(x.due_date || '')}"></label></div><div class="full field"><label>Note<textarea name="note" maxlength="1000">${esc(x.note || '')}</textarea></label></div><div class="full"><button class="btn primary">Save milestone</button></div></form>`);
+}
+async function saveMilestone(e) { if (e.target.id !== 'fMilestone') return; e.preventDefault(); try { await api('milestones', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Milestone updated'); go('overview'); } catch (x) { toast(x.message); } }
 
 const REFERRAL_STATUSES = ['Allocated','Contact attempted','Contact made','Booked','Intake completed','Active','Awaiting feedback','Closed – completed','Closed – no contact','Reallocated'];
 const SITES = ['Stellenbosch Hospital','Stellenbosch Hospital OPD','Cloetesville CDC','Groendal Clinic','Khayamandi Clinic','Klapmuts Clinic','Idas Valley Clinic','Don & Pat Clinic','Jamestown Clinic','Night Shelter','SACAP campus','Cornerstone campus'];
@@ -640,7 +684,7 @@ function referralModal(item, internsData) {
     bindSiteToggle($('#fReferral'));
     bindPresentingCategoryToggle($('#fReferral'));
 }
-async function saveReferral(e){if(e.target.id!=='fReferral')return;e.preventDefault();const item=resolvePresentingCategory(resolveSite(Object.fromEntries(new FormData(e.target))));try{await api('referrals',{method:item.id?'PATCH':'POST',body:JSON.stringify(item)});closeModal();toast(item.id?'Referral updated':'Referral added');go('referrals');}catch(x){toast(x.message);}}
+async function saveReferral(e){if(e.target.id!=='fReferral')return;e.preventDefault();const item=resolvePresentingCategory(resolveSite(Object.fromEntries(new FormData(e.target))));try{await api('referrals',{method:item.id?'PATCH':'POST',body:JSON.stringify(item)});closeModal();const linked=['Booked','Intake completed','Active','Awaiting feedback'].includes(item.status);toast(linked?'Referral saved · available in Case Workflow':item.id?'Referral updated':'Referral added');go('referrals');}catch(x){toast(x.message);}}
 
 async function requirementsView() {
   const switcherHtml = await internSwitcherHtml();
@@ -722,7 +766,7 @@ async function supervision() {
     if (['programme_lead', 'supervisor'].includes(S.session.role)) return supervisionAllView(switcherHtml);
     if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   }
-  const id = activeId(), data = await api(`supervision?intern_id=${id}`), isIntern = S.session.role === 'intern', isAdmin = S.session.role === 'programme_lead';
+  const id = activeId(), [data, overview] = await Promise.all([api(`supervision?intern_id=${id}`), api(`intern-overview?intern_id=${id}`)]), isIntern = S.session.role === 'intern', isAdmin = S.session.role === 'programme_lead';
   // Prompt 8: "improve the empty state with safe examples" — de-identified,
   // generic scenarios that model good use without referencing any real
   // patient, so the empty state doubles as a quick example of what belongs
@@ -738,7 +782,14 @@ async function supervision() {
     const overdue = x.due_date < today() && x.status === 'Open';
     return ` ${overdue ? `<span class="tag red">Due ${esc(x.due_date)} — overdue</span>` : `<span class="tag">Due ${esc(x.due_date)}</span>`}`;
   };
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h2><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}${dueLabel(x)}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Response:</b> ${esc(x.supervisor_note)}</small>` : ''}<br><small class="muted">${x.assigned_supervisor_name ? `Assigned to ${esc(x.assigned_supervisor_name)}` : 'Not yet assigned to a specific supervisor'}</small></div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}" aria-label="Review supervision item: ${esc(x.topic)}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}" data-topic="${esc(x.topic)}" aria-label="Delete supervision item: ${esc(x.topic)}">Delete</button>` : ''}</div>`).join('') || emptyState}</div>`;
+  const agenda = [];
+  data.filter(x => x.status === 'Open').forEach(x => agenda.push({severity:x.priority === 'Risk / urgent'?'red':'amber',label:`Supervision question: ${x.topic}`}));
+  overview.referrals.filter(x => referralDaysOverdue(x) > 0).forEach(x => agenda.push({severity:'red',label:`Referral ${x.referral_code}: next action overdue`}));
+  const staleCutoff = new Date(Date.now()-21*86400000);
+  overview.cases.filter(x => ['Intake','Active','Exit review'].includes(x.status) && new Date(x.updated_at) < staleCutoff).forEach(x => agenda.push({severity:'amber',label:`Case ${x.case_code}: review progress`}));
+  overview.milestones.filter(x => x.due_date && !['Complete','Not applicable'].includes(x.status) && x.due_date <= new Date(Date.now()+14*86400000).toISOString().slice(0,10)).forEach(x => agenda.push({severity:x.due_date<today()?'red':'amber',label:`Milestone: ${x.title} · due ${x.due_date}`}));
+  const agendaHtml = `<div class="card" style="margin-bottom:14px"><h3>Suggested supervision agenda</h3><p class="muted">Prepared from open questions, overdue referral actions, inactive cases and placement milestones.</p><div class="list">${agenda.map(x=>`<div class="row"><span class="tag ${x.severity}">${x.severity==='red'?'Priority':'Review'}</span><div class="grow">${esc(x.label)}</div></div>`).join('')||'<div class="queue-empty">No operational concerns detected. Use the session for reflective learning and development.</div>'}</div></div>`;
+  $('#content').innerHTML = switcherHtml + agendaHtml + `<div class="section"><div><h2>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h2><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}${dueLabel(x)}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Response:</b> ${esc(x.supervisor_note)}</small>` : ''}<br><small class="muted">${x.assigned_supervisor_name ? `Assigned to ${esc(x.assigned_supervisor_name)}` : 'Not yet assigned to a specific supervisor'}</small></div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}" aria-label="Review supervision item: ${esc(x.topic)}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}" data-topic="${esc(x.topic)}" aria-label="Delete supervision item: ${esc(x.topic)}">Delete</button>` : ''}</div>`).join('') || emptyState}</div>`;
   bindInternSwitcher();
   $('#addSup').onclick = () => supervisionModal(id);
   $$('[data-review]').forEach(b => b.onclick = () => { const x = data.find(i => i.id == b.dataset.review); modal('Review supervision item', `<form id="fSupReview"><input type="hidden" name="id" value="${x.id}"><div class="field"><label>Supervisor response<textarea name="supervisor_note">${esc(x.supervisor_note || '')}</textarea></label></div><div class="field"><label>Due date<input name="due_date" type="date" value="${esc(x.due_date || '')}"></label></div><div class="field"><label>Status<select name="status"><option>Open</option><option selected>Reviewed</option><option>Closed</option></select></label></div><button class="btn primary">Save</button></form>`); });
@@ -1131,7 +1182,13 @@ function demoRequirement(id) {
 const roundDemo = n => Math.round(n * 10) / 10;
 function demo() { return {
   interns:[{id:11,email:'erin.pilot@example.test',display_name:'Erin George',institution:'SACAP',active_cases:0,open_supervision:0,active:true,identity_user_id:'erin-pilot',placement_start:'2026-05-18',placement_end:'2026-11-12'}],
-  cases:[], sup:{11:[]}, feedback:{11:[]}, schedule:{11:[{weekday:1,start_time:'08:00',end_time:'10:00',title:'Supervision with Vivian',site:'Stellenbosch Hospital',activity_type:'Supervision',recurrence_note:'Every Monday'},{weekday:1,start_time:'10:30',title:'Patient sessions',site:'Stellenbosch Hospital',activity_type:'Clinical',recurrence_note:'3–4 bookings'},{weekday:2,start_time:'08:30',title:'Clinic day',site:'Don & Pat or Jamestown Clinic',activity_type:'Clinical + community',recurrence_note:'Patients throughout the day + one psychoeducation/community talk'},{weekday:3,start_time:'08:30',title:'Alternating clinical day',site:'Stellenbosch Hospital / Night Shelter',activity_type:'Clinical',recurrence_note:'Alternates weekly'},{weekday:4,start_time:'08:30',title:'Clinic day',site:'Idas Valley Clinic',activity_type:'Clinical',recurrence_note:'SACAP supervision at 12:00, then patients'},{weekday:5,title:'Campus day',site:'SACAP campus',activity_type:'Campus',recurrence_note:'Every Friday'}]}, planned:{11:[{activity_date:'2026-10-01',title:'Make Mental Health Everybody’s Business campaign',component_code:'psychoeducation-community',site:'Subdistrict campaign',planned_hours:null,preparation_hours:null,status:'Planned',note:'Design posters and “Did you know?” mental-health snippets; preparation begins from 1 October'},{activity_date:'2026-10-09',title:'Preschool mental-health activity',component_code:'psychoeducation-community',site:'Preschool',planned_hours:5,preparation_hours:null,status:'Planned',note:'Programme design and preparation hours to be logged when known'},{activity_date:'2026-10-23',title:'Care at the Retreat event',component_code:'psychoeducation-community',site:'Retreat',planned_hours:6,preparation_hours:18,status:'Planned',note:'Needs analysis, programme preparation and event delivery'},{activity_date:null,title:'Ebenezer activity',component_code:'psychoeducation-community',site:'Ebenezer',planned_hours:null,preparation_hours:4,status:'Planned',note:'Date and event hours to confirm'}]},
+  cases:[], sup:{11:[]}, feedback:{11:[]}, milestones:{11:[
+    {id:1,title:'Orientation completed',status:'Complete',due_date:'2026-05-18'},
+    {id:2,title:'Mid-placement evaluation',status:'Complete',due_date:'2026-08-03'},
+    {id:3,title:'Final evaluation',status:'Not started',due_date:'2026-11-02'},
+    {id:4,title:'Logbook verification',status:'In progress',due_date:'2026-11-09'},
+    {id:5,title:'Exit interview',status:'Not started',due_date:'2026-11-12'}
+  ]}, schedule:{11:[{weekday:1,start_time:'08:00',end_time:'10:00',title:'Supervision with Vivian',site:'Stellenbosch Hospital',activity_type:'Supervision',recurrence_note:'Every Monday'},{weekday:1,start_time:'10:30',title:'Patient sessions',site:'Stellenbosch Hospital',activity_type:'Clinical',recurrence_note:'3–4 bookings'},{weekday:2,start_time:'08:30',title:'Clinic day',site:'Don & Pat or Jamestown Clinic',activity_type:'Clinical + community',recurrence_note:'Patients throughout the day + one psychoeducation/community talk'},{weekday:3,start_time:'08:30',title:'Alternating clinical day',site:'Stellenbosch Hospital / Night Shelter',activity_type:'Clinical',recurrence_note:'Alternates weekly'},{weekday:4,start_time:'08:30',title:'Clinic day',site:'Idas Valley Clinic',activity_type:'Clinical',recurrence_note:'SACAP supervision at 12:00, then patients'},{weekday:5,title:'Campus day',site:'SACAP campus',activity_type:'Campus',recurrence_note:'Every Friday'}]}, planned:{11:[{activity_date:'2026-10-01',title:'Make Mental Health Everybody’s Business campaign',component_code:'psychoeducation-community',site:'Subdistrict campaign',planned_hours:null,preparation_hours:null,status:'Planned',note:'Design posters and “Did you know?” mental-health snippets; preparation begins from 1 October'},{activity_date:'2026-10-09',title:'Preschool mental-health activity',component_code:'psychoeducation-community',site:'Preschool',planned_hours:5,preparation_hours:null,status:'Planned',note:'Programme design and preparation hours to be logged when known'},{activity_date:'2026-10-23',title:'Care at the Retreat event',component_code:'psychoeducation-community',site:'Retreat',planned_hours:6,preparation_hours:18,status:'Planned',note:'Needs analysis, programme preparation and event delivery'},{activity_date:null,title:'Ebenezer activity',component_code:'psychoeducation-community',site:'Ebenezer',planned_hours:null,preparation_hours:4,status:'Planned',note:'Date and event hours to confirm'}]},
   hours:{11:[
     {work_date:'2026-09-16',component_name:'Psycho-education / community / public health / advocacy',component_code:'psychoeducation-community',hours:2,note:'Imported historical activity'},
     {work_date:'2026-09-16',component_name:'Counselling of children, adolescents & adults',component_code:'counselling',hours:1,note:'Imported historical counselling'},
@@ -1151,6 +1208,8 @@ async function demoApi(path, options = {}) {
     return d.interns.map(x=>({...x,requirement_summary:demoRequirement(x.id).summary,invite:x.invite||{status:'Active',invited_at:'2026-05-10',last_sign_in_at:'2026-09-18'}}));
   }
   if(route==='pilot-context')return {schedule:d.schedule[id]||[],planned:d.planned[id]||[]};
+  if(route==='intern-overview')return{profile:d.interns.find(x=>x.id===id)||d.interns[0],requirements:demoRequirement(id||11),referrals:d.referrals.filter(x=>x.intern_profile_id===id),cases:d.cases.filter(x=>x.intern_profile_id===id),supervision:d.sup[id]||[],milestones:d.milestones[id]||[],schedule:d.schedule[id]||[],reports:[]};
+  if(route==='milestones'){let items=d.milestones[id]||[];if(method==='GET')return items;const x=items.find(x=>x.id===+body.id);if(x)Object.assign(x,body);return x||body;}
   if(route==='feedback'){if(method==='GET')return d.feedback[id]||[];(d.feedback[id]||=[]).unshift({...body,id:Date.now(),status:'New',created_at:new Date().toISOString()});return body;}
   if(route==='requirements'){if(method==='PATCH')return body;return demoRequirement(id||11);}
   if(route==='cases'){if(method==='GET')return id?d.cases.filter(x=>x.intern_profile_id===id):d.cases;let x=d.cases.find(x=>x.id===+body.id);if(method==='PATCH'){Object.assign(x,body);return x}if(method==='POST'){const n={...body,id:Date.now(),intern_profile_id:+body.intern_profile_id,sessions:0,supervision_status:'Not yet',status:'Allocated'};d.cases.push(n);return n;}}

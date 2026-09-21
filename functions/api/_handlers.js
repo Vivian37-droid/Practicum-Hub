@@ -45,6 +45,11 @@ function sortReferrals(rows) {
   return rows.sort((a, b) => new Date(b.next_action_date || b.referral_date) - new Date(a.next_action_date || a.referral_date));
 }
 
+function missingOptionalTable(error, table) {
+  const message = String(error?.message || error?.details || '');
+  return ['42P01', 'PGRST205'].includes(error?.code) || message.includes(table);
+}
+
 const ACTIVITY_SERVICE_TYPES = new Set([
   'Individual counselling',
   'Group counselling',
@@ -247,6 +252,73 @@ export async function dashboard(ctx, env) {
   return { profile: ctx.profile, interns, metrics, queue };
 }
 
+// One read model for the Programme Lead's complete view of an intern. This
+// deliberately aggregates de-identified operational data only; clinical
+// narrative remains in the approved patient record.
+export async function internOverview(ctx, env, url) {
+  const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : 0));
+  if (!id) throw new HttpError(400, 'Intern id is required');
+  await assertInternAccess(ctx, id, env);
+  const admin = getAdmin(env);
+  const profile = await loadProfile(env, id);
+  const [requirements, referralsRes, casesRes, supervisionRes, milestonesRes, scheduleRes, reportsRes] = await Promise.all([
+    requirementProgress(env, id),
+    admin.from('referrals').select('*').eq('intern_profile_id', id).order('created_at', { ascending: false }),
+    admin.from('cases').select('*').eq('intern_profile_id', id).order('updated_at', { ascending: false }),
+    admin.from('supervision_items').select('*, cases(case_code)').eq('intern_profile_id', id).order('created_at', { ascending: false }),
+    admin.from('placement_milestones').select('*').eq('intern_profile_id', id).order('sort_order'),
+    admin.from('weekly_schedule_items').select('*').eq('intern_profile_id', id).eq('active', true).order('weekday'),
+    admin.from('monthly_reports').select('*').eq('intern_profile_id', id).order('month', { ascending: false }).limit(6)
+  ]);
+  for (const result of [referralsRes, casesRes, supervisionRes, scheduleRes, reportsRes]) {
+    if (result.error) throw new HttpError(500, result.error.message);
+  }
+  if (milestonesRes.error && !missingOptionalTable(milestonesRes.error, 'placement_milestones')) throw new HttpError(500, milestonesRes.error.message);
+  const supervision = (supervisionRes.data || []).map(row => {
+    const { cases: linkedCase, ...item } = row;
+    return { ...item, case_code: linkedCase?.case_code || null };
+  });
+  return {
+    profile,
+    requirements,
+    referrals: sortReferrals(referralsRes.data || []),
+    cases: casesRes.data || [],
+    supervision,
+    milestones: milestonesRes.error ? [] : (milestonesRes.data || []),
+    schedule: scheduleRes.data || [],
+    reports: reportsRes.data || []
+  };
+}
+
+export async function milestones(ctx, env, url, body, method) {
+  const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
+  if (!id) throw new HttpError(400, 'Intern id is required');
+  await assertInternAccess(ctx, id, env);
+  const admin = getAdmin(env);
+  if (method === 'GET') {
+    return unwrap(await admin.from('placement_milestones').select('*').eq('intern_profile_id', id).order('sort_order'));
+  }
+  requireMethod(method, ['PATCH']);
+  requireRole(ctx, ['programme_lead', 'supervisor']);
+  const milestoneId = Number(body.id || 0);
+  const { data: current, error } = await admin.from('placement_milestones').select('*').eq('id', milestoneId).maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  if (!current) throw new HttpError(404, 'Milestone not found');
+  await assertInternAccess(ctx, current.intern_profile_id, env);
+  const status = body.status || current.status;
+  if (!new Set(['Not started','In progress','Complete','Not applicable']).has(status)) throw new HttpError(400, 'Invalid milestone status');
+  const row = unwrap(await admin.from('placement_milestones').update({
+    status,
+    due_date: body.due_date === undefined ? current.due_date : (body.due_date ? dateValue(body.due_date, 'Due date') : null),
+    note: body.note === undefined ? current.note : limited(body.note, 1000, 'Milestone note'),
+    completed_at: status === 'Complete' ? (current.completed_at || new Date().toISOString()) : null,
+    updated_by_identity_user_id: ctx.user.id,
+    updated_at: new Date().toISOString()
+  }).eq('id', milestoneId).select().single());
+  await audit(ctx, env, 'update', 'milestone', milestoneId, { status, due_date: row.due_date }, current.intern_profile_id);
+  return row;
+}
+
 // Prompt 6: "add an actionable dashboard queue for missing setup, overdue
 // referrals, unreviewed reports, unresolved supervision items and other
 // items requiring attention... each queue item must explain why it needs
@@ -269,6 +341,56 @@ async function buildQueue(env, ctx, interns, supervisorId) {
       title: `${p.display_name}: incomplete placement setup`,
       reason: `Missing ${missing.join(', ')}.`,
       view: 'interns', intern_id: p.id
+    });
+  }
+
+  let acceptanceQuery = admin.from('referrals')
+    .select('id, referral_code, intern_profile_id, created_at, profiles(display_name, supervisor_identity_user_id)')
+    .is('accepted_at', null)
+    .in('status', ['Allocated','Contact attempted','Contact made','Booked'])
+    .order('created_at', { ascending: true }).limit(20);
+  if (supervisorId) acceptanceQuery = acceptanceQuery.eq('profiles.supervisor_identity_user_id', supervisorId);
+  const { data: awaitingAcceptance, error: acceptanceErr } = await acceptanceQuery;
+  if (acceptanceErr) throw new HttpError(500, acceptanceErr.message);
+  for (const r of (awaitingAcceptance || [])) items.push({
+    kind: 'awaiting_acceptance', severity: 'amber',
+    title: `Referral ${r.referral_code || '#' + r.id} awaiting acceptance`,
+    reason: `${r.profiles?.display_name || 'Intern'} has not yet acknowledged this allocation.`,
+    view: 'referrals', intern_id: r.intern_profile_id
+  });
+
+  const staleBefore = new Date(Date.now() - 21 * 86400000).toISOString();
+  let staleCaseQuery = admin.from('cases')
+    .select('id, case_code, intern_profile_id, updated_at, profiles(display_name, supervisor_identity_user_id)')
+    .in('status', ['Intake','Active','Exit review'])
+    .lt('updated_at', staleBefore)
+    .order('updated_at', { ascending: true }).limit(20);
+  if (supervisorId) staleCaseQuery = staleCaseQuery.eq('profiles.supervisor_identity_user_id', supervisorId);
+  const { data: staleCases, error: staleErr } = await staleCaseQuery;
+  if (staleErr) throw new HttpError(500, staleErr.message);
+  for (const c of (staleCases || [])) items.push({
+    kind: 'stale_case', severity: 'amber',
+    title: `Case ${c.case_code || '#' + c.id} needs a progress check`,
+    reason: `No workflow activity has been recorded for at least 21 days (${c.profiles?.display_name || 'intern'}).`,
+    view: 'cases', intern_id: c.intern_profile_id
+  });
+
+  let milestoneQuery = admin.from('placement_milestones')
+    .select('id, title, due_date, intern_profile_id, profiles(display_name, supervisor_identity_user_id)')
+    .not('status', 'in', '(Complete,Not applicable)')
+    .not('due_date', 'is', null)
+    .lte('due_date', new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10))
+    .order('due_date', { ascending: true }).limit(20);
+  if (supervisorId) milestoneQuery = milestoneQuery.eq('profiles.supervisor_identity_user_id', supervisorId);
+  const { data: dueMilestones, error: milestoneErr } = await milestoneQuery;
+  if (milestoneErr && !missingOptionalTable(milestoneErr, 'placement_milestones')) throw new HttpError(500, milestoneErr.message);
+  for (const m of (milestoneErr ? [] : (dueMilestones || []))) {
+    const overdue = m.due_date < new Date().toISOString().slice(0, 10);
+    items.push({
+      kind: 'milestone_due', severity: overdue ? 'red' : 'amber',
+      title: `${m.title} ${overdue ? 'overdue' : 'due soon'}`,
+      reason: `${m.profiles?.display_name || 'Intern'} · due ${m.due_date}.`,
+      view: 'overview', intern_id: m.intern_profile_id
     });
   }
 
