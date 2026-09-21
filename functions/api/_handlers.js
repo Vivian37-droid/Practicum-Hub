@@ -1085,16 +1085,23 @@ export async function referrals(ctx, env, url, body, method) {
   const nextActionDate = body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null;
   const lastUpdate = limited(body.last_update, 1000, 'Operational update');
   const updateCategory = body.update_category == null ? current.update_category : limited(body.update_category, 60, 'Operational update category');
-  const row = unwrap(await admin.rpc('update_referral', {
-    p_referral_id: current.id,
-    p_priority: priority,
-    p_status: status,
-    p_contact_attempts: attempts,
-    p_next_action_date: nextActionDate,
-    p_last_update: lastUpdate,
-    p_updated_by: ctx.user.id,
-    p_update_category: updateCategory
-  }));
+  // Keep referral edits on the same direct PostgREST path used by creation
+  // and acceptance. The previous RPC depended on the deployed database
+  // having the latest overloaded update_referral signature; when that
+  // signature drifted, the UI looked as though it saved but no edit reached
+  // the row. A direct update removes that migration-order dependency.
+  const closedAt = status.startsWith('Closed') ? (current.closed_at || new Date().toISOString()) : null;
+  const row = unwrap(await admin.from('referrals').update({
+    priority,
+    status,
+    contact_attempts: attempts,
+    next_action_date: nextActionDate,
+    last_update: lastUpdate,
+    update_category: updateCategory,
+    updated_by_identity_user_id: ctx.user.id,
+    updated_at: new Date().toISOString(),
+    closed_at: closedAt
+  }).eq('id', current.id).select().single());
   await audit(ctx, env, 'update', 'referral', row.id, { status }, current.intern_profile_id);
   return row;
 }
