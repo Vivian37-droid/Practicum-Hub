@@ -501,7 +501,12 @@ async function demoApi(path, options = {}) {
 function demoProgramme(d){const atRiskInterns=demoRequirement(11).summary.at_risk_components>0?1:0;return{metrics:{interns:1,cases:0,active_cases:0,hours:470.5,at_risk_interns:atRiskInterns,open_supervision:0,reviewed_reports:0,booked:0,attended:0,attendance_rate:null,median_days_to_intake:null},sites:[],institutions:[{institution:'SACAP',count:1}]};}
 async function preview(role){S.preview=true;S.data=demo();const profile=role==='intern'?{id:11,display_name:'Erin George'}:{id:1,display_name:role==='management'?'Programme Viewer':'Vivian Leibrandt'};S.session={profile,role};shell();const requested=new URLSearchParams(location.search).get('view');if(requested&&titles[requested])setTimeout(()=>go(requested),0);}
 let pendingAuthType=null;
-function authError(message){$('#authErr').classList.remove('hidden');$('#authErr').textContent=message;}
+function authMessage(message, kind='danger'){
+  const el=$('#authErr');
+  el.className=`notice ${kind}`;
+  el.textContent=message;
+}
+function authError(message){authMessage(message,'danger');}
 function showPasswordSetup(type){pendingAuthType=type;$('#login').classList.add('hidden');$('#setPassword').classList.remove('hidden');$('#setPasswordMessage').innerHTML=type==='recovery'?'<b>Choose a new password</b><br>Enter and confirm your new password.':'<b>Finish setting up your account</b><br>Create a password to accept your invitation.';}
 async function finishLogin(){const b=await api('bootstrap');S.session={profile:b.profile,role:b.role};shell();}
 
@@ -518,7 +523,13 @@ async function init(){
     const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
     if(!window.__SUPABASE_URL__ || window.__SUPABASE_URL__.includes('YOUR-PROJECT-REF')) throw Error('Supabase is not configured yet (see public/config.js).');
     S.supabase=createClient(window.__SUPABASE_URL__, window.__SUPABASE_ANON_KEY__);
-    const hashType=new URLSearchParams(location.hash.replace(/^#/,'')).get('type');
+    const hashParams=new URLSearchParams(location.hash.replace(/^#/,''));
+    const hashType=hashParams.get('type');
+    const hashError=hashParams.get('error_description');
+    if(hashError){
+      history.replaceState(null,'',location.pathname);
+      authError('This sign-in link is invalid or has expired. Use “Forgot password?” to receive a new secure link.');
+    }
     S.supabase.auth.onAuthStateChange((event, session)=>{
       if(event==='PASSWORD_RECOVERY') return showPasswordSetup('recovery');
       if(event==='SIGNED_IN' && hashType==='invite' && pendingAuthType!==null) return; // already showing set-password form
@@ -530,6 +541,17 @@ async function init(){
 }
 
 $('#login').onsubmit=async e=>{e.preventDefault();try{const {error}=await S.supabase.auth.signInWithPassword({email:$('#email').value,password:$('#password').value});if(error)throw error;await finishLogin();}catch(x){authError(x.message);}};
+$('#forgotPassword').onclick=async()=>{
+  const email=$('#email').value.trim();
+  if(!email){authError('Enter your email address first, then select “Forgot password?”.');$('#email').focus();return;}
+  try{
+    $('#forgotPassword').disabled=true;
+    const {error}=await S.supabase.auth.resetPasswordForEmail(email,{redirectTo:`${location.origin}/`});
+    if(error)throw error;
+    authMessage('Password-reset email sent. Open the newest email and use its link once.','info');
+  }catch(x){authError(x.message||'The password-reset email could not be sent.');}
+  finally{$('#forgotPassword').disabled=false;}
+};
 $('#setPassword').onsubmit=async e=>{e.preventDefault();const password=$('#newPassword').value;if(password!==$('#confirmPassword').value)return authError('The passwords do not match.');try{const {error}=await S.supabase.auth.updateUser({password});if(error)throw error;history.replaceState(null,'',location.pathname);location.replace('/');}catch(x){authError(x.message);}};
 $('#logout').onclick=()=>S.preview?location.reload():(S.supabase.auth.signOut().then(()=>location.reload()));
 $('#menu').onclick=()=>$('aside').classList.toggle('open');
