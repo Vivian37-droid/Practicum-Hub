@@ -1054,6 +1054,7 @@ export async function referrals(ctx, env, url, body, method) {
     const priority = body.priority || 'Routine';
     if (!REFERRAL_STATUSES.has(status) || !REFERRAL_PRIORITIES.has(priority)) throw new HttpError(400, 'Invalid referral status or priority');
     const attempts = Math.max(0, Math.min(100, Number(body.contact_attempts || 0)));
+    const selfAllocated = ctx.role === 'intern' && id === ctx.profile.id;
     const row = unwrap(await admin.from('referrals').insert({
       intern_profile_id: id,
       referral_code: limited(body.referral_code, 50, 'Referral code', true)?.toUpperCase(),
@@ -1067,10 +1068,12 @@ export async function referrals(ctx, env, url, body, method) {
       next_action_date: body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null,
       last_update: limited(body.last_update, 1000, 'Operational update'),
       update_category: limited(body.update_category, 60, 'Operational update category'),
+      accepted_at: selfAllocated ? new Date().toISOString() : null,
+      accepted_by_identity_user_id: selfAllocated ? ctx.user.id : null,
       created_by_identity_user_id: ctx.user.id,
       updated_by_identity_user_id: ctx.user.id
     }).select().single());
-    await audit(ctx, env, 'create', 'referral', row.id, { status }, id);
+    await audit(ctx, env, 'create', 'referral', row.id, { status, self_allocated: selfAllocated }, id);
     return row;
   }
   const { data: current, error: curErr } = await admin.from('referrals').select('*').eq('id', Number(body.id)).maybeSingle();
