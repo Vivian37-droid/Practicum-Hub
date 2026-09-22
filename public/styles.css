@@ -27,6 +27,7 @@ header{height:74px;backdrop-filter:blur(14px);background:#f8fbf9e8;padding:0 28p
 /* Prompt 6: grouped navigation, actionable dashboard queue, skeleton loading */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .navgroup{margin:10px 0}.navgroup h4{margin:0 0 2px;padding:8px 10px 2px;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#ffffff70;font-weight:800}
+#nav{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-right:4px;scrollbar-width:thin;scrollbar-color:#ffffff45 transparent}.partner-mini,.foot{flex-shrink:0}
 .navbtn[aria-current="page"]{background:#ffffff1d;color:#fff}
 .skeleton-block{display:grid;gap:10px}
 .skel-line{height:64px;border-radius:12px;background:linear-gradient(90deg,#e9eef2 25%,#f3f6f8 37%,#e9eef2 63%);background-size:400% 100%;animation:skel-shimmer 1.4s ease infinite}
