@@ -517,12 +517,24 @@ async function interns() {
   }));
   $$('[data-purge-intern]').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
-    modal(`Permanently delete ${esc(b.dataset.name)}?`, `<form id="fPurgeIntern"><input type="hidden" name="id" value="${b.dataset.purgeIntern}"><input type="hidden" name="action" value="purge_test_intern"><p>This is only for a test placement. It permanently removes the sign-in account and all linked hours, referrals, cases, supervision, competencies and reports. It cannot be undone.</p><div class="field"><label>Reason<textarea name="reason" required></textarea></label></div><div class="field"><label>Type ${esc(b.dataset.email)} to confirm<input name="confirm_email" type="email" required autocomplete="off"></label></div><button class="btn danger-btn">Permanently delete test record</button></form>`);
+    modal(`Permanently delete ${esc(b.dataset.name)}?`, `<form id="fPurgeIntern"><input type="hidden" name="id" value="${b.dataset.purgeIntern}"><input type="hidden" name="action" value="purge_test_intern"><p>This is only for a test placement. It permanently removes the sign-in account and all linked hours, referrals, cases, supervision, competencies and reports. It cannot be undone.</p><div id="purgeError" class="notice danger hidden" role="alert" aria-live="assertive"></div><div class="field"><label>Reason<textarea name="reason" required></textarea></label></div><div class="field"><label>Type ${esc(b.dataset.email)} to confirm<input name="confirm_email" type="email" required autocomplete="off"></label></div><button class="btn danger-btn">Permanently delete test record</button></form>`);
   }));
   bindRowExpand();
 }
 async function saveIntern(e) { if (e.target.id !== 'fIntern') return; e.preventDefault(); try { const created = await api('interns', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); setActiveIntern(created); closeModal(); toast(created.invite?.sent ? 'Placement created · invite email sent' : created.invite && !created.invite.sent ? `Placement created, but the invite email failed: ${created.invite.reason || 'unknown error'}` : 'Placement updated'); go('interns'); } catch (x) { toast(x.message); } }
-async function purgeIntern(e) { if (e.target.id !== 'fPurgeIntern') return; e.preventDefault(); try { await api('interns', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); clearActiveIntern(); closeModal(); toast('Test intern and linked records permanently deleted'); go('interns'); } catch (x) { toast(x.message); } }
+async function purgeIntern(e) {
+  if (e.target.id !== 'fPurgeIntern') return;
+  e.preventDefault();
+  const errorBox = $('#purgeError', e.target);
+  errorBox?.classList.add('hidden');
+  try {
+    await api('interns', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
+    clearActiveIntern(); closeModal(); toast('Test intern and linked records permanently deleted'); go('interns');
+  } catch (x) {
+    if (errorBox) { errorBox.textContent = x.message || 'The test intern could not be deleted.'; errorBox.classList.remove('hidden'); }
+    toast('Deletion failed — see the message in the form.');
+  }
+}
 
 function internPreviewMarkup(d) {
   const req = d.requirements;
