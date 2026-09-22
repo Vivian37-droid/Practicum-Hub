@@ -50,7 +50,7 @@ registerForm('fSchedule', e => saveSchedule(e));
 registerForm('fMilestone', e => saveMilestone(e));
 registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData(e.target)); b.context_view = S.view; try { await api('feedback', { method: 'POST', body: JSON.stringify(b) }); toast('Feedback saved'); go('feedback'); } catch (x) { toast(x.message); } });
 
-let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '', reportsMonth: null };
+let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '', reportsMonth: null, dailyDate: null };
 
 // Per-role nav labels (unchanged wording from before Prompt 6) — now grouped
 // under NAV_GROUPS instead of rendered as one flat list, per Prompt 6's
@@ -58,22 +58,22 @@ let S = { identity: null, session: null, view: 'dashboard', intern: null, previe
 // appears in the sidebar for a role if it has a label here, so role
 // permissions are exactly as strict as before this refactor.
 const NAV_LABELS = {
-  programme_lead: { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
-  supervisor: { dashboard: 'Action Centre', interns: 'Assigned interns', overview: 'Intern overview', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
-  intern: { dashboard: 'My placement', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
+  programme_lead: { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
+  supervisor: { dashboard: 'Action Centre', interns: 'Assigned interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
+  intern: { dashboard: 'My placement', daily: 'How was today?', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
   management: { dashboard: 'Programme overview', programme: 'Programme evidence', handbook: 'Handbook' }
 };
 // Group order and membership per Prompt 6. A group is only rendered for a
 // role if at least one of its views has a label for that role.
 const NAV_GROUPS = [
-  ['Operations', ['referrals', 'cases', 'hours']],
+  ['Operations', ['daily', 'referrals', 'cases', 'hours']],
   ['Progress', ['progress', 'supervision', 'competencies']],
   ['Insights', ['dashboard', 'reports', 'programme']],
   ['Support', ['assistant', 'feedback', 'handbook']],
   ['Administration', ['interns', 'overview']]
 ];
 function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
-const titles = { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
+const titles = { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', daily: 'How was today?', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
 
 let toastTimer = null;
 // Prompt 4: "an undo or soft-delete approach where practical" — for
@@ -286,6 +286,7 @@ async function go(view, opts = {}) {
   $('#content').innerHTML = skeleton();
   try {
     if (view === 'dashboard') await dashboard();
+    else if (view === 'daily') await daily();
     else if (view === 'interns') await interns();
     else if (view === 'overview') await internOverviewView();
     else if (view === 'referrals') await referrals();
@@ -748,8 +749,33 @@ async function cases() {
   bindRowExpand();
 }
 async function saveCase(e) { if (e.target.id !== 'fCase') return; e.preventDefault(); try { await api('cases', { method: 'POST', body: JSON.stringify(resolvePresentingCategory(resolveSite(Object.fromEntries(new FormData(e.target))))) }); closeModal(); toast('Case allocated'); go('cases'); } catch (x) { toast(x.message); } }
-function activityModal(c) { modal('Record counselling activity · ' + c.case_code, `<form id="fActivity" class="formgrid"><input type="hidden" name="intern_profile_id" value="${c.intern_profile_id}"><input type="hidden" name="case_id" value="${c.id}"><div class="field"><label>Date<input name="encounter_date" type="date" value="${today()}" required></label></div><div class="field"><label>Session<select name="session_type"><option>Intake</option><option>Follow-up</option><option>Termination</option></select></label></div><div class="field"><label>Booked<select name="booked"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Attended<select name="attended"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Duration if attended (minutes)<input name="duration_minutes" type="number" min="1" max="480" value="60"></label></div><div class="field"><label>Gender for monthly statistics<select name="patient_gender"><option>Female</option><option>Male</option><option>Other</option><option>Unknown</option></select></label></div><div class="full"><button class="btn primary">Save activity</button></div></form>`); }
-async function saveActivity(e) { if (e.target.id !== 'fActivity') return; e.preventDefault(); try { await api('encounters', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Session recorded'); go('cases'); } catch (x) { toast(x.message); } }
+function activityModal(c, selectedDate = today(), returnView = 'cases') { modal('Record counselling activity · ' + c.case_code, `<form id="fActivity" class="formgrid" data-return-view="${esc(returnView)}"><input type="hidden" name="intern_profile_id" value="${c.intern_profile_id}"><input type="hidden" name="case_id" value="${c.id}"><div class="field"><label>Date<input name="encounter_date" type="date" value="${esc(selectedDate)}" required></label></div><div class="field"><label>Session<select name="session_type"><option>Intake</option><option>Follow-up</option><option>Termination</option></select></label></div><div class="field"><label>Booked<select name="booked"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Attended<select name="attended"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Duration if attended (minutes)<input name="duration_minutes" type="number" min="1" max="480" value="60"></label></div><div class="field"><label>Gender for monthly statistics<select name="patient_gender"><option>Female</option><option>Male</option><option>Other</option><option>Unknown</option></select></label></div><div class="full"><button class="btn primary">Save activity</button></div></form>`); }
+async function saveActivity(e) { if (e.target.id !== 'fActivity') return; e.preventDefault(); const returnView = e.target.dataset.returnView || 'cases'; try { await api('encounters', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Session recorded'); go(returnView); } catch (x) { toast(x.message); } }
+
+async function daily() {
+  const switcherHtml = await internSwitcherHtml();
+  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
+  const id = activeId(), selectedDate = S.dailyDate || today();
+  const [data, hoursData] = await Promise.all([api(`daily-summary?intern_id=${id}&date=${selectedDate}`), api(`hours?intern_id=${id}`)]);
+  const s = data.stats || {};
+  const missingGender = Number(s.not_recorded_gender || 0);
+  const sessionRows = (data.encounters || []).map(x => `<div class="row"><div class="grow"><b>${esc(x.case_code || 'De-identified case')}</b><br><small class="muted">${esc(x.session_type)} · ${x.booked ? 'Booked' : 'Not booked'} · ${x.attended ? `Attended · ${fmt(x.duration_minutes)} min · ${esc(x.patient_gender || 'Unknown')}` : 'Did not attend'} · ${esc(x.site || 'Facility not recorded')}</small></div>${tag(x.attended ? 'Attended' : 'DNA')}</div>`).join('');
+  const activityRows = (data.activities || []).map(x => `<div class="row"><div class="grow"><b>${esc(x.service_type || x.category)}</b><br><small class="muted">${esc(x.category)} · ${esc(x.site || 'Facility not recorded')}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b></div>`).join('');
+  $('#content').innerHTML = switcherHtml + `<div class="hero"><small>Daily close-out</small><h2>How was today?</h2><p>Record today’s work once. The totals below come from the same case sessions and activity entries used in Reports and practicum-hour calculations.</p><div class="actions"><button id="dailySession" class="btn">Record individual session</button><button id="dailyOther" class="btn">Log another activity</button></div></div>
+    <div class="section"><div><h3>Daily summary</h3><p>Choose a date to review or complete.</p></div><div class="field" style="min-width:180px"><label>Date<input id="dailyDate" type="date" value="${esc(selectedDate)}"></label></div></div>
+    <div class="grid three">${metric('Booked', s.booked || 0)}${metric('Attended', s.attended || 0)}${metric('Did not attend', s.did_not_attend || 0)}${metric('Female', s.female || 0)}${metric('Male', s.male || 0)}${metric('Intake sessions', s.intake_sessions || 0)}${metric('Follow-up sessions', s.follow_up_sessions || 0)}${metric('Counselling time', `${fmt((s.counselling_minutes || 0) / 60)} h`)}${metric('Other activities', (data.activities || []).length)}</div>
+    ${missingGender ? `<div class="notice amber" style="margin-top:14px"><b>Complete today’s records:</b> ${missingGender} attended session${missingGender === 1 ? ' has' : 's have'} no gender recorded.</div>` : ''}
+    <div class="grid two" style="margin-top:14px"><div><div class="section"><h3>Individual counselling</h3></div><div class="card list">${sessionRows || 'No individual sessions recorded for this date.'}</div></div><div><div class="section"><h3>Other practicum activity</h3></div><div class="card list">${activityRows || 'No additional activities recorded for this date.'}</div></div></div>
+    <div class="notice info" style="margin-top:14px"><b>No duplicate capture:</b> individual sessions recorded here are saved in Case workflow and counted automatically. The Activity form includes Individual, Group and Family counselling; use Individual there only when the session is not already recorded against a case.</div>`;
+  bindInternSwitcher();
+  $('#dailyDate').onchange = e => { S.dailyDate = e.target.value; go('daily'); };
+  $('#dailySession').onclick = () => {
+    if (!(data.cases || []).length) return toast('No active case is available. Add or activate a case first.');
+    modal('Choose a case', `<div class="card list">${data.cases.map(c => `<button class="btn" data-daily-case="${c.id}">${esc(c.case_code)} · ${esc(c.site)}</button>`).join('')}</div>`);
+    $$('[data-daily-case]').forEach(b => b.onclick = () => activityModal(data.cases.find(c => c.id == b.dataset.dailyCase), selectedDate, 'daily'));
+  };
+  $('#dailyOther').onclick = () => activityHoursModal(id, hoursData.components, selectedDate, 'daily');
+}
 
 // §4 gap fix: when a programme_lead/supervisor hasn't picked an intern from
 // the switcher, show the cross-intern feed instead of just "select an
@@ -852,18 +878,23 @@ function practicumActivityTypeOptions(selected = 'Other professional activity') 
   return PRACTICUM_ACTIVITY_TYPES.map(type => `<option ${type === selected ? 'selected' : ''}>${esc(type)}</option>`).join('');
 }
 
+function activityHoursModal(id, components, selectedDate = today(), returnView = 'hours') {
+  const opts = components.map(c => `<option value="${esc(c.code)}">${esc(c.manual_label || c.name)}</option>`).join('');
+  modal('Log practicum activity', `<form id="fHours" class="formgrid" data-return-view="${esc(returnView)}"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Activity type<select name="service_type" required>${practicumActivityTypeOptions()}</select></label><small class="muted">Includes Individual, Group and Family counselling. Do not log an individual session again if it is already in Case workflow.</small></div><div class="field"><label>Facility<select name="site" required>${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Date<input name="work_date" type="date" value="${esc(selectedDate)}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`);
+  bindSiteToggle($('#fHours'));
+}
+
 async function hours() {
   const switcherHtml = await internSwitcherHtml({ allowAll: true });
   if (!activeId() && ['programme_lead', 'supervisor'].includes(S.session.role)) return hoursAllView(switcherHtml);
   if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
   const id = activeId(), [data, req] = await Promise.all([api(`hours?intern_id=${id}`), api(`requirements?intern_id=${id}`)]);
-  const opts = data.components.map(c => `<option value="${esc(c.code)}">${esc(c.manual_label || c.name)}</option>`).join('');
   const isAdmin = S.session.role === 'programme_lead';
   $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>Activity log</h2><p>Log each practicum activity against the institution’s formal category.</p></div><button id="logHours" class="btn primary">Log activity hours</button></div>
     <div class="grid two"><div class="notice info"><b>Avoid double-counting individual sessions.</b><br>Sessions already recorded against a case are counted automatically. Use “Individual counselling” here only when the session is not recorded in Case workflow.</div><div class="card"><b>${esc(req.profile.requirement_profile_name || '')}</b><p class="muted">${fmt(req.summary.total_completed)} of ${fmt(req.summary.total_target)} formal hours currently recorded.</p>${progressBar(req.summary.total_completed, req.summary.total_target)}</div></div>
     <div class="section"><h3>Recent activity</h3></div><div class="card list">${data.entries.map(x => `<div class="row"><div class="grow"><b>${esc(x.component_name || x.category)}</b>${x.correction_history?.length ? ` <span class="tag amber">Corrected ×${x.correction_history.length}</span>` : ''}<br><small class="muted">${esc(x.work_date)} · ${esc(x.service_type || 'Legacy activity type not recorded')} · ${esc(x.site || 'Facility not recorded')}${x.note ? ' · ' + esc(x.note) : ''}</small>${x.correction_history?.length ? `<details><summary>Correction history</summary><div class="list" style="margin-top:6px">${x.correction_history.map(h => `<div class="row"><div class="grow"><small>${esc(h.reason || 'No reason recorded')}${h.before && h.after ? ` — ${fmt(h.before.hours)} h → ${fmt(h.after.hours)} h` : ''}</small></div><small class="muted">${esc(new Date(h.created_at).toLocaleDateString())}</small></div>`).join('')}</div></details>` : ''}</div><b>${fmt(x.hours)} h</b>${isAdmin ? `<button class="btn small" data-edit-hours="${x.id}" aria-label="Edit activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Edit</button> <button class="btn small danger-btn" data-del-hours="${x.id}" aria-label="Delete activity entry: ${esc(x.component_name || x.category)} on ${esc(x.work_date)}">Delete</button>` : ''}</div>`).join('') || 'No manually logged activity yet.'}</div>`;
   bindInternSwitcher();
-  $('#logHours').onclick = () => { modal('Log practicum activity', `<form id="fHours" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="full field"><label>Formal requirement<select name="component_code" required>${opts}</select></label></div><div class="field"><label>Activity type<select name="service_type" required>${practicumActivityTypeOptions()}</select></label><small class="muted">Choose what she actually did. Use the formal requirement above to show which SACAP requirement it counts toward.</small></div><div class="field"><label>Facility<select name="site" required>${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Hours<input name="hours" type="number" min="0.25" max="24" step="0.25" required></label></div><div class="full field"><label>Brief description<textarea name="note" placeholder="No patient-identifying information"></textarea></label></div><div class="full"><button class="btn primary">Save hours</button></div></form>`); bindSiteToggle($('#fHours')); };
+  $('#logHours').onclick = () => activityHoursModal(id, data.components);
   // Prompt 4: "a correction workflow for logged hours rather than silent
   // destructive deletion" — Edit updates the entry in place (with a
   // mandatory reason, audited as a before/after pair) instead of requiring
@@ -877,7 +908,7 @@ async function hours() {
     reason: { required: true, label: 'Reason for deleting' }
   }));
 }
-async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); try { await api('hours', { method: 'POST', body: JSON.stringify(resolveSite(Object.fromEntries(new FormData(e.target)))) }); closeModal(); toast('Activity saved'); go('hours'); } catch (x) { toast(x.message); } }
+async function saveHours(e) { if (e.target.id !== 'fHours') return; e.preventDefault(); const returnView = e.target.dataset.returnView || 'hours'; try { await api('hours', { method: 'POST', body: JSON.stringify(resolveSite(Object.fromEntries(new FormData(e.target)))) }); closeModal(); toast('Activity saved'); go(returnView); } catch (x) { toast(x.message); } }
 async function saveHoursCorrection(e) { if (e.target.id !== 'fHoursEdit') return; e.preventDefault(); try { await api('hours', { method: 'PATCH', body: JSON.stringify(resolveSite(Object.fromEntries(new FormData(e.target)))) }); closeModal(); toast('Activity entry corrected'); go('hours'); } catch (x) { toast(x.message); } }
 
 // Prompt 7: builds the CSV export from exactly the rows/fields the page
@@ -1214,7 +1245,11 @@ async function demoApi(path, options = {}) {
   if(route==='requirements'){if(method==='PATCH')return body;return demoRequirement(id||11);}
   if(route==='cases'){if(method==='GET')return id?d.cases.filter(x=>x.intern_profile_id===id):d.cases;let x=d.cases.find(x=>x.id===+body.id);if(method==='PATCH'){Object.assign(x,body);return x}if(method==='POST'){const n={...body,id:Date.now(),intern_profile_id:+body.intern_profile_id,sessions:0,supervision_status:'Not yet',status:'Allocated'};d.cases.push(n);return n;}}
   if(route==='referrals'){if(method==='GET')return d.referrals;let x=d.referrals.find(x=>x.id===+body.id);if(method==='PATCH'){if(body.action==='accept'){x.accepted_at=new Date().toISOString();return x;}Object.assign(x,body);return x}const n={...body,id:Date.now(),intern_profile_id:id||+body.intern_profile_id||11,intern_name:'Erin George',contact_attempts:+body.contact_attempts||0};d.referrals.push(n);return n;}
-  if(route==='encounters'){d.enc.push({...body,booked:String(body.booked)!=='false',attended:String(body.attended)!=='false'});return body;}
+  if(route==='encounters'){if(method==='GET')return d.enc.filter(x=>x.intern_profile_id===id);d.enc.push({...body,id:Date.now(),intern_profile_id:+body.intern_profile_id,booked:String(body.booked)!=='false',attended:String(body.attended)!=='false',duration_minutes:+body.duration_minutes||0,site:d.cases.find(c=>c.id===+body.case_id)?.site||'',case_code:d.cases.find(c=>c.id===+body.case_id)?.case_code||''});return body;}
+  if(route==='daily-summary'){
+    const day=q.get('date')||today(),enc=d.enc.filter(x=>x.intern_profile_id===id&&x.encounter_date===day),att=enc.filter(x=>x.attended),activities=(d.hours[id]||[]).filter(x=>x.work_date===day);
+    return{date:day,stats:{booked:enc.filter(x=>x.booked).length,attended:att.length,did_not_attend:enc.filter(x=>x.booked&&!x.attended).length,female:att.filter(x=>x.patient_gender==='Female').length,male:att.filter(x=>x.patient_gender==='Male').length,other_gender:att.filter(x=>x.patient_gender==='Other').length,not_recorded_gender:att.filter(x=>!x.patient_gender||x.patient_gender==='Unknown').length,intake_sessions:att.filter(x=>x.session_type==='Intake').length,follow_up_sessions:att.filter(x=>x.session_type==='Follow-up').length,termination_sessions:att.filter(x=>x.session_type==='Termination').length,counselling_minutes:att.reduce((n,x)=>n+(+x.duration_minutes||0),0)},encounters:enc,activities,cases:d.cases.filter(x=>x.intern_profile_id===id&&x.status!=='Exited')};
+  }
   if(route==='supervision'){if(method==='GET')return d.sup[id]||[];if(method==='POST'){(d.sup[id]||=[]).push({...body,id:Date.now(),status:'Open'});return body}return body;}
   if(route==='supervision-feed')return Object.entries(d.sup).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
   if(route==='hours-feed')return Object.entries(d.hours).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));

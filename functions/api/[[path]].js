@@ -24,6 +24,7 @@ export async function onRequest({ request, env }) {
     if (path === 'requirements') return json(await h.requirements(ctx, env, url, body, method));
     if (path === 'cases') return json(await h.cases(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'encounters') return json(await h.encounters(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
+    if (path === 'daily-summary') return json(await h.dailySummary(ctx, env, url));
     if (path === 'hours') return json(await h.hoursView(ctx, env, url, body, method), method === 'POST' ? 201 : 200);
     if (path === 'hours-feed') return json(await h.hoursFeed(ctx, env));
     if (path === 'supervision') return json(await h.supervision(ctx, env, url, body, method), method === 'POST' ? 201 : 200);

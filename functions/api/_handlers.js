@@ -767,6 +767,51 @@ export async function encounters(ctx, env, url, body, method) {
   return row;
 }
 
+// Daily close-out read model. It deliberately derives the figures from the
+// same encounter and hours rows used by Cases, Activity and Reports; there is
+// no second set of daily totals that can drift from the source records.
+export async function dailySummary(ctx, env, url) {
+  const admin = getAdmin(env);
+  const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : 0));
+  await assertInternAccess(ctx, id, env);
+  const day = dateValue(url.searchParams.get('date') || new Date().toISOString().slice(0, 10), 'Date');
+  const [encounterRes, hoursRes, casesRes] = await Promise.all([
+    admin.from('encounters').select('*, cases(case_code)').eq('intern_profile_id', id).eq('encounter_date', day)
+      .order('created_at', { ascending: true }),
+    admin.from('hours').select('*').eq('intern_profile_id', id).eq('work_date', day)
+      .order('created_at', { ascending: true }),
+    admin.from('cases').select('*').eq('intern_profile_id', id).neq('status', 'Exited')
+      .order('case_code', { ascending: true })
+  ]);
+  for (const result of [encounterRes, hoursRes, casesRes]) {
+    if (result.error) throw new HttpError(500, result.error.message);
+  }
+  const encounters = (encounterRes.data || []).map(r => {
+    const { cases: linkedCase, ...rest } = r;
+    return { ...rest, case_code: linkedCase?.case_code ?? null };
+  });
+  const attended = encounters.filter(x => x.attended);
+  return {
+    date: day,
+    stats: {
+      booked: encounters.filter(x => x.booked).length,
+      attended: attended.length,
+      did_not_attend: encounters.filter(x => x.booked && !x.attended).length,
+      female: attended.filter(x => x.patient_gender === 'Female').length,
+      male: attended.filter(x => x.patient_gender === 'Male').length,
+      other_gender: attended.filter(x => x.patient_gender === 'Other').length,
+      not_recorded_gender: attended.filter(x => !x.patient_gender || x.patient_gender === 'Unknown').length,
+      intake_sessions: attended.filter(x => x.session_type === 'Intake').length,
+      follow_up_sessions: attended.filter(x => x.session_type === 'Follow-up').length,
+      termination_sessions: attended.filter(x => x.session_type === 'Termination').length,
+      counselling_minutes: attended.reduce((total, x) => total + num(x.duration_minutes), 0)
+    },
+    encounters,
+    activities: hoursRes.data || [],
+    cases: casesRes.data || []
+  };
+}
+
 export async function hoursView(ctx, env, url, body, method) {
   const admin = getAdmin(env);
   if (method === 'DELETE') {
