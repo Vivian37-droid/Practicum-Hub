@@ -23,6 +23,12 @@ describe('test-intern deletion feedback', () => {
     expect(app).toContain("errorBox.textContent = x.message");
     expect(app).toContain('Deletion failed — see the message in the form.');
   });
+
+  it('bounds Supabase account deletion and verifies a slow result', () => {
+    expect(h.authCallWithTimeout).toBeUndefined(); // helper remains private
+    expect(fs.readFileSync(new URL('../functions/api/_handlers.js', import.meta.url), 'utf8')).toContain('Supabase took too long to remove the sign-in account');
+    expect(fs.readFileSync(new URL('../functions/api/_handlers.js', import.meta.url), 'utf8')).toContain('admin.auth.admin.getUserById(row.identity_user_id)');
+  });
 });
 
 describe('deleting a referral', () => {
