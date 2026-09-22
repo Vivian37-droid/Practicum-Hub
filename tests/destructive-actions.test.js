@@ -5,15 +5,25 @@
 // helpers/mockAdmin.js) — nothing here reads or writes a real database.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockAdmin, auditInsertPayload, ctxFor } from './helpers/mockAdmin.js';
+import fs from 'node:fs';
 
 const { getAdminMock } = vi.hoisted(() => ({ getAdminMock: vi.fn() }));
 vi.mock('../functions/_shared/clients.js', () => ({ getAdmin: getAdminMock }));
 
 const h = await import('../functions/api/_handlers.js');
+const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 
 function fakeUrl(qs = '') { return new URL('https://hub.example.test/api/x' + qs); }
 
 beforeEach(() => { getAdminMock.mockReset(); });
+
+describe('test-intern deletion feedback', () => {
+  it('keeps a server failure visible inside the deletion form', () => {
+    expect(app).toContain('id="purgeError"');
+    expect(app).toContain("errorBox.textContent = x.message");
+    expect(app).toContain('Deletion failed — see the message in the form.');
+  });
+});
 
 describe('deleting a referral', () => {
   it('deactivating an intern writes an audit record with the reason and returns no auth-account deletion', async () => {
