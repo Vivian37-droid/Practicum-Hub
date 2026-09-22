@@ -69,6 +69,14 @@ function activityServiceType(value) {
   return result;
 }
 
+function timeoutAfter(ms, message) {
+  return new Promise((_, reject) => setTimeout(() => reject(new HttpError(504, message)), ms));
+}
+
+async function authCallWithTimeout(promise, ms, message) {
+  return Promise.race([promise, timeoutAfter(ms, message)]);
+}
+
 async function requirementProgress(env, id) {
   const admin = getAdmin(env);
   const { data, error } = await admin.rpc('requirement_progress_data', { p_intern_id: id });
@@ -499,8 +507,38 @@ export async function interns(ctx, env, url, body, method) {
     const reason = limited(body.reason, 500, 'Reason', true);
     await audit(ctx, env, 'purge_test_intern', 'intern', internId, { display_name: row.display_name, email: row.email }, internId, reason);
     if (row.identity_user_id) {
-      const { error: authErr } = await admin.auth.admin.deleteUser(row.identity_user_id);
-      if (authErr) throw new HttpError(500, `The placement was not deleted because the sign-in account could not be removed: ${authErr.message}`);
+      let deletionError = null;
+      try {
+        const { error: authErr } = await authCallWithTimeout(
+          admin.auth.admin.deleteUser(row.identity_user_id),
+          12000,
+          'Supabase took too long to remove the sign-in account'
+        );
+        deletionError = authErr;
+      } catch (error) {
+        deletionError = error;
+      }
+
+      // A timed-out request may still have completed at Supabase. Check the
+      // account once before stopping so a slow successful deletion does not
+      // leave the placement record behind indefinitely.
+      if (deletionError) {
+        try {
+          const { data: authLookup, error: lookupErr } = await authCallWithTimeout(
+            admin.auth.admin.getUserById(row.identity_user_id),
+            5000,
+            'Supabase did not respond while verifying the sign-in account'
+          );
+          const accountStillExists = !lookupErr && Boolean(authLookup?.user);
+          if (accountStillExists) {
+            throw new HttpError(504, `The test placement was not deleted because Supabase could not remove its sign-in account: ${deletionError.message || deletionError}`);
+          }
+        } catch (verifyError) {
+          if (verifyError instanceof HttpError && verifyError.status === 504) throw verifyError;
+          // A not-found/error response after deletion means there is no usable
+          // auth account left to block removal of the deactivated test record.
+        }
+      }
     }
     const { error: deleteErr } = await admin.from('profiles').delete().eq('id', internId);
     if (deleteErr) throw new HttpError(500, deleteErr.message);
