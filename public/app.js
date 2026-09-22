@@ -50,7 +50,7 @@ registerForm('fSchedule', e => saveSchedule(e));
 registerForm('fMilestone', e => saveMilestone(e));
 registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData(e.target)); b.context_view = S.view; try { await api('feedback', { method: 'POST', body: JSON.stringify(b) }); toast('Feedback saved'); go('feedback'); } catch (x) { toast(x.message); } });
 
-let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '', reportsMonth: null, dailyDate: null };
+let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '', reportsMonth: null, dailyDate: null, refreshPromise: null };
 
 // Per-role nav labels (unchanged wording from before Prompt 6) — now grouped
 // under NAV_GROUPS instead of rendered as one flat list, per Prompt 6's
@@ -232,14 +232,37 @@ function downloadCsv(filename, csv) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+async function accessSession(forceRefresh = false) {
+  if (forceRefresh || !S.refreshPromise) {
+    const pendingRefresh = (async () => {
+      if (!forceRefresh) {
+        const { data, error } = await S.supabase.auth.getSession();
+        if (error) throw error;
+        if (data.session) return data.session;
+      }
+      const { data, error } = await S.supabase.auth.refreshSession();
+      if (error) throw error;
+      return data.session || null;
+    })();
+    S.refreshPromise = pendingRefresh;
+    pendingRefresh.finally(() => { if (S.refreshPromise === pendingRefresh) S.refreshPromise = null; });
+  }
+  return S.refreshPromise;
+}
+
 async function api(path, options = {}) {
   if (S.preview) return demoApi(path, options);
-  const { data: { session } } = await S.supabase.auth.getSession();
-  if (!session) { location.reload(); throw Error('Your session has expired. Please sign in again.'); }
-  const response = await fetch('/api/' + path, {
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.access_token}` },
+  let session = await accessSession();
+  if (!session) throw Error('Your session has expired. Please sign in again.');
+  const request = currentSession => fetch('/api/' + path, {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${currentSession.access_token}` },
     ...options
   });
+  let response = await request(session);
+  if (response.status === 401) {
+    session = await accessSession(true);
+    if (session) response = await request(session);
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw Error(body.error || 'Request failed');
   return body;
