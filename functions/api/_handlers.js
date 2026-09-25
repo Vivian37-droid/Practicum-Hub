@@ -263,6 +263,26 @@ export async function dashboard(ctx, env) {
   return { profile: ctx.profile, interns, metrics, queue };
 }
 
+export async function weeklyPlan(ctx, env, url, body, method) {
+  const admin = getAdmin(env);
+  const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
+  if (!id) throw new HttpError(400, 'Intern id is required');
+  await assertInternAccess(ctx, id, env);
+  if (method === 'GET') {
+    const start = url.searchParams.get('start') || new Date().toISOString().slice(0,10);
+    const endDate = new Date(start + 'T00:00:00Z'); endDate.setUTCDate(endDate.getUTCDate()+7);
+    return unwrap(await admin.from('weekly_appointments').select('*').eq('intern_profile_id',id).gte('appointment_date',start).lt('appointment_date',endDate.toISOString().slice(0,10)).order('appointment_date').order('appointment_time'));
+  }
+  requireMethod(method, ['PATCH']);
+  const { data: current, error } = await admin.from('weekly_appointments').select('*').eq('id',Number(body.id)).maybeSingle();
+  if (error) throw new HttpError(500,error.message);
+  if (!current) throw new HttpError(404,'Appointment not found');
+  await assertInternAccess(ctx,current.intern_profile_id,env);
+  const allowed = new Set(['Booked','Attended','Did not attend','Cancelled','Rescheduled']);
+  if (!allowed.has(body.status)) throw new HttpError(400,'Invalid appointment outcome');
+  return unwrap(await admin.from('weekly_appointments').update({status:body.status,session_type:body.session_type||null,duration_minutes:body.duration_minutes?Number(body.duration_minutes):null,patient_gender:body.patient_gender||null,updated_at:new Date().toISOString()}).eq('id',current.id).select().single());
+}
+
 function emptyInternSnapshot() {
   return {
     referrals_total: 0, referrals_open: 0, referrals_accepted: 0,
@@ -286,17 +306,19 @@ async function buildInternSnapshots(admin, interns) {
   const today = now.toISOString().slice(0, 10);
   const weekStart = monday.toISOString().slice(0, 10);
   const weekEnd = nextMonday.toISOString().slice(0, 10);
-  const [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes] = await Promise.all([
+  const [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes, appointmentsRes] = await Promise.all([
     admin.from('referrals').select('intern_profile_id,status,contact_attempts,accepted_at,next_action_date').in('intern_profile_id', internIds),
     admin.from('encounters').select('intern_profile_id,encounter_date,booked,attended,session_type').in('intern_profile_id', internIds).gte('encounter_date', weekStart).lt('encounter_date', weekEnd),
     admin.from('hours').select('intern_profile_id,work_date,hours,service_type,component_code').in('intern_profile_id', internIds).gte('work_date', weekStart).lt('work_date', weekEnd),
     admin.from('planned_activities').select('intern_profile_id,title,activity_date,site,status').in('intern_profile_id', internIds).gte('activity_date', today).lt('activity_date', weekEnd).order('activity_date'),
     admin.from('weekly_schedule_items').select('intern_profile_id,weekday,title,site,start_time').in('intern_profile_id', internIds).eq('active', true).gte('weekday', day).order('weekday'),
-    admin.from('supervision_items').select('intern_profile_id,status').in('intern_profile_id', internIds).eq('status', 'Open')
+    admin.from('supervision_items').select('intern_profile_id,status').in('intern_profile_id', internIds).eq('status', 'Open'),
+    admin.from('weekly_appointments').select('intern_profile_id,status,appointment_date,appointment_time,site').in('intern_profile_id',internIds).gte('appointment_date',weekStart).lt('appointment_date',weekEnd)
   ]);
   for (const result of [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes]) {
     if (result.error) throw new HttpError(500, result.error.message);
   }
+  if (appointmentsRes.error && !missingOptionalTable(appointmentsRes.error,'weekly_appointments')) throw new HttpError(500,appointmentsRes.error.message);
   const out = Object.fromEntries(internIds.map(id => [id, emptyInternSnapshot()]));
   for (const r of refsRes.data || []) {
     const s = out[r.intern_profile_id]; if (!s) continue;
@@ -339,6 +361,13 @@ async function buildInternSnapshots(admin, interns) {
   }
   for (const item of supervisionRes.data || []) {
     const s = out[item.intern_profile_id]; if (s) s.outstanding++;
+  }
+  for (const a of appointmentsRes.error ? [] : (appointmentsRes.data || [])) {
+    const s=out[a.intern_profile_id]; if(!s) continue;
+    s.booked_week++;
+    if(a.status==='Attended') s.attended_week++;
+    if(a.status==='Did not attend') s.dna_week++;
+    if(a.status==='Booked') s.upcoming_week.push({title:'Patient appointment',date:a.appointment_date,time:a.appointment_time,site:a.site,kind:'Booked'});
   }
   Object.values(out).forEach(s => { s.hours_week = round(s.hours_week, 1); s.upcoming_week = s.upcoming_week.slice(0, 4); });
   return out;

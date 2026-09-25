@@ -58,22 +58,22 @@ let S = { identity: null, session: null, view: 'dashboard', intern: null, previe
 // appears in the sidebar for a role if it has a label here, so role
 // permissions are exactly as strict as before this refactor.
 const NAV_LABELS = {
-  programme_lead: { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
-  supervisor: { dashboard: 'Action Centre', interns: 'Assigned interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
-  intern: { dashboard: 'My placement', daily: 'How was today?', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
+  programme_lead: { dashboard: 'Action Centre', weekly: 'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
+  supervisor: { dashboard: 'Action Centre', weekly: 'Weekly plan', interns: 'Assigned interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
+  intern: { dashboard: 'My placement', weekly: 'My weekly plan', daily: 'How was today?', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
   management: { dashboard: 'Programme overview', programme: 'Programme evidence', handbook: 'Handbook' }
 };
 // Group order and membership per Prompt 6. A group is only rendered for a
 // role if at least one of its views has a label for that role.
 const NAV_GROUPS = [
-  ['Operations', ['daily', 'referrals', 'cases', 'hours']],
+  ['Operations', ['weekly','daily', 'referrals', 'cases', 'hours']],
   ['Progress', ['progress', 'supervision', 'competencies']],
   ['Insights', ['dashboard', 'reports', 'programme']],
   ['Support', ['assistant', 'feedback', 'handbook']],
   ['Administration', ['interns', 'overview']]
 ];
 function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
-const titles = { dashboard: 'Action Centre', interns: 'Interns', overview: 'Intern overview', daily: 'How was today?', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
+const titles = { dashboard: 'Action Centre', weekly:'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'How was today?', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
 
 let toastTimer = null;
 // Prompt 4: "an undo or soft-delete approach where practical" — for
@@ -313,6 +313,7 @@ async function go(view, opts = {}) {
     else if (view === 'interns') await interns();
     else if (view === 'overview') await internOverviewView();
     else if (view === 'referrals') await referrals();
+    else if (view === 'weekly') await weeklyPlan();
     else if (view === 'progress') await requirementsView();
     else if (view === 'cases') await cases();
     else if (view === 'supervision') await supervision();
@@ -512,6 +513,18 @@ function bindQueue(items, interns) {
     el.onclick = openItem;
     el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openItem(); } };
   });
+}
+
+function nextMonday(){const d=new Date(),day=d.getDay()||7;d.setDate(d.getDate()-day+8);return d.toISOString().slice(0,10)}
+async function weeklyPlan(){
+  const switcherHtml=await internSwitcherHtml(); if(!needIntern(switcherHtml)){bindInternSwitcher();return}
+  const start=S.weeklyStart||nextMonday(), data=await api(`weekly-plan?intern_id=${activeId()}&start=${start}`);
+  const statuses=['Booked','Attended','Did not attend','Cancelled','Rescheduled'];
+  const rows=data.map(x=>`<tr><td>${esc(x.appointment_date)}</td><td>${esc(String(x.appointment_time).slice(0,5))}</td><td>${esc(x.site)}</td><td><select data-plan-status="${x.id}">${statuses.map(s=>`<option ${s===x.status?'selected':''}>${s}</option>`).join('')}</select></td></tr>`).join('');
+  const counts=Object.fromEntries(statuses.map(s=>[s,data.filter(x=>x.status===s).length]));
+  $('#content').innerHTML=switcherHtml+`<div class="action-head"><div><span class="eyebrow-dark">Week beginning ${esc(start)}</span><h2>Weekly plan</h2><p>Update each booked slot once. Attendance figures flow to the Action Centre automatically.</p></div></div><div class="grid metrics">${metric('Booked',counts.Booked)}${metric('Attended',counts.Attended)}${metric('Did not attend',counts['Did not attend'])}${metric('Total slots',data.length)}</div><div class="section"><h3>Patient appointments</h3></div>${table(['Date','Time','Facility','Outcome'],rows,'No appointments loaded for this week.')}`;
+  $$('[data-plan-status]').forEach(el=>el.onchange=async()=>{try{await api('weekly-plan',{method:'PATCH',body:JSON.stringify({id:el.dataset.planStatus,status:el.value})});toast('Appointment outcome updated');go('weekly')}catch(x){toast(x.message)}});
+  bindInternSwitcher();
 }
 
 // Prompt 8: "invitation date, invitation status, last login" — Account tag
@@ -1270,7 +1283,7 @@ function demoRequirement(id) {
 const roundDemo = n => Math.round(n * 10) / 10;
 function demo() { return {
   interns:[{id:11,email:'erin.pilot@example.test',display_name:'Erin George',institution:'SACAP',active_cases:0,open_supervision:0,active:true,identity_user_id:'erin-pilot',placement_start:'2026-05-18',placement_end:'2026-11-12'}],
-  cases:[], sup:{11:[]}, feedback:{11:[]}, milestones:{11:[
+  cases:[], appointments:{11:[]}, sup:{11:[]}, feedback:{11:[]}, milestones:{11:[
     {id:1,title:'Orientation completed',status:'Complete',due_date:'2026-05-18'},
     {id:2,title:'Mid-placement evaluation',status:'Complete',due_date:'2026-08-03'},
     {id:3,title:'Final evaluation',status:'Not started',due_date:'2026-11-02'},
@@ -1307,6 +1320,7 @@ async function demoApi(path, options = {}) {
     const day=q.get('date')||today(),enc=d.enc.filter(x=>x.intern_profile_id===id&&x.encounter_date===day),att=enc.filter(x=>x.attended),activities=(d.hours[id]||[]).filter(x=>x.work_date===day);
     return{date:day,stats:{booked:enc.filter(x=>x.booked).length,attended:att.length,did_not_attend:enc.filter(x=>x.booked&&!x.attended).length,female:att.filter(x=>x.patient_gender==='Female').length,male:att.filter(x=>x.patient_gender==='Male').length,other_gender:att.filter(x=>x.patient_gender==='Other').length,not_recorded_gender:att.filter(x=>!x.patient_gender||x.patient_gender==='Unknown').length,intake_sessions:att.filter(x=>x.session_type==='Intake').length,follow_up_sessions:att.filter(x=>x.session_type==='Follow-up').length,termination_sessions:att.filter(x=>x.session_type==='Termination').length,counselling_minutes:att.reduce((n,x)=>n+(+x.duration_minutes||0),0)},encounters:enc,activities,cases:d.cases.filter(x=>x.intern_profile_id===id&&x.status!=='Exited')};
   }
+  if(route==='weekly-plan'){const items=d.appointments[id]||[];if(method==='GET')return items;const x=items.find(x=>x.id===+body.id);if(x)Object.assign(x,body);return x||body;}
   if(route==='supervision'){if(method==='GET')return d.sup[id]||[];if(method==='POST'){(d.sup[id]||=[]).push({...body,id:Date.now(),status:'Open'});return body}return body;}
   if(route==='supervision-feed')return Object.entries(d.sup).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
   if(route==='hours-feed')return Object.entries(d.hours).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
