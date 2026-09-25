@@ -287,7 +287,7 @@ async function buildInternSnapshots(admin, internIds) {
   const [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes] = await Promise.all([
     admin.from('referrals').select('intern_profile_id,status,contact_attempts,accepted_at,next_action_date').in('intern_profile_id', internIds),
     admin.from('encounters').select('intern_profile_id,encounter_date,booked,attended,session_type').in('intern_profile_id', internIds).gte('encounter_date', weekStart).lt('encounter_date', weekEnd),
-    admin.from('hours').select('intern_profile_id,work_date,hours').in('intern_profile_id', internIds).gte('work_date', weekStart).lt('work_date', weekEnd),
+    admin.from('hours').select('intern_profile_id,work_date,hours,service_type').in('intern_profile_id', internIds).gte('work_date', weekStart).lt('work_date', weekEnd),
     admin.from('planned_activities').select('intern_profile_id,title,activity_date,site,status').in('intern_profile_id', internIds).gte('activity_date', today).lt('activity_date', weekEnd).order('activity_date'),
     admin.from('weekly_schedule_items').select('intern_profile_id,weekday,title,site,start_time').in('intern_profile_id', internIds).eq('active', true).gte('weekday', day).order('weekday'),
     admin.from('supervision_items').select('intern_profile_id,status').in('intern_profile_id', internIds).eq('status', 'Open')
@@ -318,7 +318,12 @@ async function buildInternSnapshots(admin, internIds) {
   }
   for (const h of hoursRes.data || []) {
     const s = out[h.intern_profile_id]; if (!s) continue;
-    s.activities_week++;
+    // Individual sessions can be recorded either against a case (encounters)
+    // or, when no case record exists, as an Activity Log entry. The UI warns
+    // against recording the same session in both places, so each manual
+    // Individual counselling row represents one additional attended session.
+    if (h.service_type === 'Individual counselling') s.attended_week++;
+    else s.activities_week++;
     s.hours_week += Number(h.hours || 0);
   }
   for (const p of plannedRes.data || []) {

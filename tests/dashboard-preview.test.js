@@ -7,4 +7,10 @@ describe('dashboard preview metrics', () => {
     expect(source).toContain('at_risk:atRisk');
     expect(source).not.toMatch(/metrics:\{[^}]*\bat_risk\s*\}/);
   });
+
+  it('includes manually logged individual counselling in weekly sessions', () => {
+    const source = fs.readFileSync(new URL('../functions/api/_handlers.js', import.meta.url), 'utf8');
+    expect(source).toContain("select('intern_profile_id,work_date,hours,service_type')");
+    expect(source).toContain("if (h.service_type === 'Individual counselling') s.attended_week++");
+  });
 });
