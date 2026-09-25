@@ -302,11 +302,12 @@ export async function myService(ctx, env, url, body, method){
     const month=String(url.searchParams.get('month')||new Date().toISOString().slice(0,7));
     if(!/^\d{4}-\d{2}$/.test(month))throw new HttpError(400,'Invalid month');
     const start=month+'-01',endDate=new Date(start+'T00:00:00Z');endDate.setUTCMonth(endDate.getUTCMonth()+1);
-    const [entries,facilities]=await Promise.all([
+    const [entries,facilities,schedule]=await Promise.all([
       admin.from('service_statistics').select('*').eq('owner_identity_user_id',owner).gte('work_date',start).lt('work_date',endDate.toISOString().slice(0,10)).order('work_date',{ascending:false}),
-      admin.from('facilities').select('id,name,service_context').eq('active',true).order('name')
-    ]);for(const r of [entries,facilities])if(r.error)throw new HttpError(500,r.error.message);
-    return{entries:entries.data,facilities:facilities.data};
+      admin.from('facilities').select('id,name,service_context').eq('active',true).order('name'),
+      admin.from('service_schedule').select('*').eq('owner_identity_user_id',owner).eq('active',true).gte('service_date',start).lt('service_date',endDate.toISOString().slice(0,10)).order('service_date')
+    ]);for(const r of [entries,facilities,schedule])if(r.error)throw new HttpError(500,r.error.message);
+    return{entries:entries.data,facilities:facilities.data,schedule:schedule.data};
   }
   requireMethod(method,['POST']);
   const facility=unwrap(await admin.from('facilities').select('id,name').eq('id',Number(body.facility_id)).single());
