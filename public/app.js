@@ -66,11 +66,12 @@ const NAV_LABELS = {
 // Group order and membership per Prompt 6. A group is only rendered for a
 // role if at least one of its views has a label for that role.
 const NAV_GROUPS = [
-  ['Operations', ['weekly','daily', 'referrals', 'cases', 'hours']],
-  ['Progress', ['progress', 'supervision', 'competencies']],
-  ['Insights', ['dashboard', 'reports', 'programme']],
-  ['Support', ['assistant', 'feedback', 'handbook']],
-  ['Administration', ['interns', 'overview']]
+  ['Home', ['dashboard']],
+  ['Weekly work', ['weekly','daily']],
+  ['Clinical work', ['referrals','cases']],
+  ['Supervision', ['supervision']],
+  ['Progress', ['hours','progress','competencies','interns','overview']],
+  ['Reports & support', ['reports','programme','assistant','feedback','handbook']]
 ];
 function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
 const titles = { dashboard: 'Action Centre', weekly:'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'How was today?', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
@@ -277,7 +278,8 @@ function shell() {
   $('#nav').innerHTML = NAV_GROUPS.map(([groupLabel, views]) => {
     const items = views.filter(v => labels[v]);
     if (!items.length) return '';
-    return `<div class="navgroup" role="group" aria-label="${esc(groupLabel)}"><h4>${esc(groupLabel)}</h4>${items.map(v => `<button class="navbtn" data-view="${v}">${esc(labels[v])}</button>`).join('')}</div>`;
+    const always=groupLabel==='Home';
+    return `<details class="navgroup" ${always?'open':''}><summary>${esc(groupLabel)}</summary><div>${items.map(v => `<button class="navbtn" data-view="${v}">${esc(labels[v])}</button>`).join('')}</div></details>`;
   }).join('');
   $$('.navbtn').forEach(b => b.onclick = () => go(b.dataset.view));
   const requested = new URLSearchParams(location.search).get('view');
@@ -522,7 +524,9 @@ async function weeklyPlan(){
   const statuses=['Booked','Attended','Did not attend','Cancelled','Rescheduled'];
   const rows=data.map(x=>`<tr><td>${esc(x.appointment_date)}</td><td>${esc(String(x.appointment_time).slice(0,5))}</td><td>${esc(x.site)}</td><td><select data-plan-status="${x.id}">${statuses.map(s=>`<option ${s===x.status?'selected':''}>${s}</option>`).join('')}</select></td></tr>`).join('');
   const counts=Object.fromEntries(statuses.map(s=>[s,data.filter(x=>x.status===s).length]));
-  $('#content').innerHTML=switcherHtml+`<div class="action-head"><div><span class="eyebrow-dark">Week beginning ${esc(start)}</span><h2>Weekly plan</h2><p>Update each booked slot once. Attendance figures flow to the Action Centre automatically.</p></div></div><div class="grid metrics">${metric('Booked',counts.Booked)}${metric('Attended',counts.Attended)}${metric('Did not attend',counts['Did not attend'])}${metric('Total slots',data.length)}</div><div class="section"><h3>Patient appointments</h3></div>${table(['Date','Time','Facility','Outcome'],rows,'No appointments loaded for this week.')}`;
+  const facilities=[...new Set(data.map(x=>x.site))];
+  const facilitySummary=facilities.map(site=>{const xs=data.filter(x=>x.site===site);return `<div class="facility-chip"><b>${esc(site)}</b><span>${xs.length} booked · ${xs.filter(x=>x.status==='Attended').length} attended · ${xs.filter(x=>x.status==='Did not attend').length} DNA</span></div>`}).join('');
+  $('#content').innerHTML=switcherHtml+`<div class="action-head"><div><span class="eyebrow-dark">Week beginning ${esc(start)}</span><h2>Weekly work</h2><p>Appointments are grouped by service facility. Update each outcome once.</p></div></div><div class="weekly-summary"><div class="weekly-primary"><strong>${data.length}</strong><span>appointments planned</span></div><div class="weekly-outcomes"><span><b>${counts.Attended}</b> attended</span><span><b>${counts['Did not attend']}</b> DNA</span><span><b>${counts.Booked}</b> awaiting outcome</span></div></div><div class="facility-strip">${facilitySummary||'<span class="muted">No facilities scheduled.</span>'}</div><div class="section"><h3>Appointment list</h3></div>${table(['Date','Time','Facility','Outcome'],rows,'No appointments loaded for this week.')}`;
   $$('[data-plan-status]').forEach(el=>el.onchange=async()=>{try{await api('weekly-plan',{method:'PATCH',body:JSON.stringify({id:el.dataset.planStatus,status:el.value})});toast('Appointment outcome updated');go('weekly')}catch(x){toast(x.message)}});
   bindInternSwitcher();
 }
