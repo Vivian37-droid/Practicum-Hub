@@ -295,6 +295,27 @@ export async function weeklyPlan(ctx, env, url, body, method) {
   return unwrap(await admin.from('weekly_appointments').update({status:body.status,session_type:body.session_type||null,duration_minutes:body.duration_minutes?Number(body.duration_minutes):null,patient_gender:body.patient_gender||null,updated_at:new Date().toISOString()}).eq('id',current.id).select().single());
 }
 
+export async function myService(ctx, env, url, body, method){
+  requireRole(ctx,['programme_lead']);
+  const admin=getAdmin(env),owner=ctx.user.id;
+  if(method==='GET'){
+    const month=String(url.searchParams.get('month')||new Date().toISOString().slice(0,7));
+    if(!/^\d{4}-\d{2}$/.test(month))throw new HttpError(400,'Invalid month');
+    const start=month+'-01',endDate=new Date(start+'T00:00:00Z');endDate.setUTCMonth(endDate.getUTCMonth()+1);
+    const [entries,facilities]=await Promise.all([
+      admin.from('service_statistics').select('*').eq('owner_identity_user_id',owner).gte('work_date',start).lt('work_date',endDate.toISOString().slice(0,10)).order('work_date',{ascending:false}),
+      admin.from('facilities').select('id,name,service_context').eq('active',true).order('name')
+    ]);for(const r of [entries,facilities])if(r.error)throw new HttpError(500,r.error.message);
+    return{entries:entries.data,facilities:facilities.data};
+  }
+  requireMethod(method,['POST']);
+  const facility=unwrap(await admin.from('facilities').select('id,name').eq('id',Number(body.facility_id)).single());
+  const number=k=>{const n=Number(body[k]||0);if(!Number.isInteger(n)||n<0||n>500)throw new HttpError(400,`Invalid ${k}`);return n};
+  const row={owner_identity_user_id:owner,work_date:dateValue(body.work_date,'Work date'),facility_id:facility.id,facility_name:facility.name,booked:number('booked'),attended:number('attended'),female:number('female'),male:number('male'),other_gender:number('other_gender'),intake:number('intake'),follow_up:number('follow_up'),individual:number('individual'),group_sessions:number('group_sessions'),family_sessions:number('family_sessions'),community_activities:number('community_activities'),note:limited(body.note,500,'Note'),updated_at:new Date().toISOString()};
+  if(row.attended>row.booked)throw new HttpError(400,'Attended cannot exceed booked');
+  return unwrap(await admin.from('service_statistics').upsert(row,{onConflict:'owner_identity_user_id,work_date,facility_name'}).select().single());
+}
+
 function emptyInternSnapshot() {
   return {
     referrals_total: 0, referrals_open: 0, referrals_accepted: 0,

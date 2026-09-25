@@ -48,6 +48,7 @@ registerForm('fHours', e => saveHours(e));
 registerForm('fHoursEdit', e => saveHoursCorrection(e));
 registerForm('fSchedule', e => saveSchedule(e));
 registerForm('fWeeklyAppointment', e => saveWeeklyAppointment(e));
+registerForm('fMyService', e => saveMyService(e));
 registerForm('fMilestone', e => saveMilestone(e));
 registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData(e.target)); b.context_view = S.view; try { await api('feedback', { method: 'POST', body: JSON.stringify(b) }); toast('Feedback saved'); go('feedback'); } catch (x) { toast(x.message); } });
 
@@ -59,7 +60,7 @@ let S = { identity: null, session: null, view: 'dashboard', intern: null, previe
 // appears in the sidebar for a role if it has a label here, so role
 // permissions are exactly as strict as before this refactor.
 const NAV_LABELS = {
-  programme_lead: { dashboard: 'Action Centre', weekly: 'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
+  programme_lead: { dashboard: 'Action Centre', myservice:'My Service', weekly: 'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
   supervisor: { dashboard: 'Action Centre', weekly: 'Weekly plan', interns: 'Assigned interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
   intern: { dashboard: 'My placement', weekly: 'My weekly plan', daily: 'How was today?', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
   management: { dashboard: 'Programme overview', programme: 'Programme evidence', handbook: 'Handbook' }
@@ -67,7 +68,7 @@ const NAV_LABELS = {
 // Group order and membership per Prompt 6. A group is only rendered for a
 // role if at least one of its views has a label for that role.
 const NAV_GROUPS = [
-  ['Home', ['dashboard']],
+  ['Home', ['dashboard','myservice']],
   ['Weekly work', ['weekly','daily']],
   ['Clinical work', ['referrals','cases']],
   ['Supervision', ['supervision']],
@@ -75,7 +76,7 @@ const NAV_GROUPS = [
   ['Reports & support', ['reports','programme','assistant','feedback','handbook']]
 ];
 function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
-const titles = { dashboard: 'Action Centre', weekly:'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'How was today?', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
+const titles = { dashboard: 'Action Centre', myservice:'My Service', weekly:'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'How was today?', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
 
 let toastTimer = null;
 // Prompt 4: "an undo or soft-delete approach where practical" — for
@@ -317,6 +318,7 @@ async function go(view, opts = {}) {
     else if (view === 'overview') await internOverviewView();
     else if (view === 'referrals') await referrals();
     else if (view === 'weekly') await weeklyPlan();
+    else if (view === 'myservice') await myService();
     else if (view === 'progress') await requirementsView();
     else if (view === 'cases') await cases();
     else if (view === 'supervision') await supervision();
@@ -532,6 +534,15 @@ async function weeklyPlan(){
   bindInternSwitcher();
 }
 async function saveWeeklyAppointment(e){try{await api('weekly-plan',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});closeModal();toast('Case appointment added');go('weekly')}catch(x){toast(x.message)}}
+async function myService(){
+  const selected=S.myServiceMonth||month(),d=await api(`my-service?month=${selected}`),entries=d.entries||[],sum=k=>entries.reduce((n,x)=>n+Number(x[k]||0),0),booked=sum('booked'),attended=sum('attended');
+  const sites=[...new Set(entries.map(x=>x.facility_name))],facilityRows=sites.map(site=>{const xs=entries.filter(x=>x.facility_name===site),b=xs.reduce((n,x)=>n+x.booked,0),a=xs.reduce((n,x)=>n+x.attended,0);return `<tr><td><b>${esc(site)}</b></td><td>${b}</td><td>${a}</td><td>${Math.max(0,b-a)}</td><td>${a+Math.max(0,b-a)?Math.round(a/b*100)||0:0}%</td></tr>`}).join('');
+  const recent=entries.map(x=>`<div class="row"><div class="grow"><b>${esc(x.work_date)} · ${esc(x.facility_name)}</b><br><small class="muted">${x.booked} booked · ${x.attended} attended · ${Math.max(0,x.booked-x.attended)} DNA${x.note?' · '+esc(x.note):''}</small></div></div>`).join('');
+  $('#content').innerHTML=`<div class="action-head"><div><span class="eyebrow-dark">Private service record</span><h2>My Service</h2><p>Your figures are separate from intern activity.</p></div><div class="action-filters"><input id="myServiceMonth" type="month" value="${esc(selected)}"><button id="addMyStats" class="btn primary">Add daily figures</button></div></div><div class="grid metrics action-metrics">${metric('Booked',booked)}${metric('Attended',attended)}${metric('DNA',Math.max(0,booked-attended))}${metric('Attendance rate',booked?Math.round(attended/booked*100)+'%':'—')}</div><div class="section"><h3>By facility</h3></div>${table(['Facility','Booked','Attended','DNA','Attendance'],facilityRows,'No service statistics for this month.')}<div class="section"><h3>Daily entries</h3></div><div class="card list">${recent||'No daily figures recorded yet.'}</div>`;
+  $('#myServiceMonth').onchange=e=>{S.myServiceMonth=e.target.value;go('myservice')};
+  $('#addMyStats').onclick=()=>modal('Add daily service figures',`<form id="fMyService" class="formgrid"><div class="field"><label>Date<input name="work_date" type="date" value="${today()}" required></label></div><div class="field"><label>Facility<select name="facility_id" required><option value="">Select facility…</option>${d.facilities.map(f=>`<option value="${f.id}">${esc(f.name)} — ${esc(f.service_context)}</option>`).join('')}</select></label></div>${['booked','attended','female','male','other_gender','intake','follow_up','individual','group_sessions','family_sessions','community_activities'].map(k=>`<div class="field"><label>${esc(k.replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase()))}<input name="${k}" type="number" min="0" value="0" required></label></div>`).join('')}<div class="full field"><label>Note<textarea name="note" maxlength="500"></textarea></label></div><div class="full"><button class="btn primary">Save daily figures</button></div></form>`);
+}
+async function saveMyService(e){try{await api('my-service',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});closeModal();toast('Daily service figures saved');go('myservice')}catch(x){toast(x.message)}}
 
 // Prompt 8: "invitation date, invitation status, last login" — Account tag
 // colour follows the same status vocabulary the rest of the app uses.
@@ -1288,7 +1299,7 @@ function demoRequirement(id) {
 }
 const roundDemo = n => Math.round(n * 10) / 10;
 function demo() { return {
-  interns:[{id:11,email:'erin.pilot@example.test',display_name:'Erin George',institution:'SACAP',active_cases:0,open_supervision:0,active:true,identity_user_id:'erin-pilot',placement_start:'2026-05-18',placement_end:'2026-11-12'}],
+  serviceStats:[],interns:[{id:11,email:'erin.pilot@example.test',display_name:'Erin George',institution:'SACAP',active_cases:0,open_supervision:0,active:true,identity_user_id:'erin-pilot',placement_start:'2026-05-18',placement_end:'2026-11-12'}],
   cases:[], appointments:{11:[]}, sup:{11:[]}, feedback:{11:[]}, milestones:{11:[
     {id:1,title:'Orientation completed',status:'Complete',due_date:'2026-05-18'},
     {id:2,title:'Mid-placement evaluation',status:'Complete',due_date:'2026-08-03'},
@@ -1327,6 +1338,7 @@ async function demoApi(path, options = {}) {
     return{date:day,stats:{booked:enc.filter(x=>x.booked).length,attended:att.length,did_not_attend:enc.filter(x=>x.booked&&!x.attended).length,female:att.filter(x=>x.patient_gender==='Female').length,male:att.filter(x=>x.patient_gender==='Male').length,other_gender:att.filter(x=>x.patient_gender==='Other').length,not_recorded_gender:att.filter(x=>!x.patient_gender||x.patient_gender==='Unknown').length,intake_sessions:att.filter(x=>x.session_type==='Intake').length,follow_up_sessions:att.filter(x=>x.session_type==='Follow-up').length,termination_sessions:att.filter(x=>x.session_type==='Termination').length,counselling_minutes:att.reduce((n,x)=>n+(+x.duration_minutes||0),0)},encounters:enc,activities,cases:d.cases.filter(x=>x.intern_profile_id===id&&x.status!=='Exited')};
   }
   if(route==='weekly-plan'){const items=d.appointments[id]||[];if(method==='GET')return{appointments:items,cases:d.cases.filter(c=>c.intern_profile_id===id),facilities:SITES.map((name,i)=>({id:i+1,name,service_context:name.includes('OPD')?'Outpatient':name==='Stellenbosch Hospital'?'Inpatient':'Community'}))};if(method==='POST'){const n={...body,id:Date.now(),intern_profile_id:id,status:'Booked',site:SITES[+body.facility_id-1]};items.push(n);return n}const x=items.find(x=>x.id===+body.id);if(x)Object.assign(x,body);return x||body;}
+  if(route==='my-service'){const facilities=SITES.map((name,i)=>({id:i+1,name,service_context:name.includes('OPD')?'Outpatient':name==='Stellenbosch Hospital'?'Inpatient':'Community'}));if(method==='GET')return{entries:d.serviceStats,facilities};const n={...body,id:Date.now(),facility_name:facilities[+body.facility_id-1].name};d.serviceStats.push(n);return n;}
   if(route==='supervision'){if(method==='GET')return d.sup[id]||[];if(method==='POST'){(d.sup[id]||=[]).push({...body,id:Date.now(),status:'Open'});return body}return body;}
   if(route==='supervision-feed')return Object.entries(d.sup).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
   if(route==='hours-feed')return Object.entries(d.hours).flatMap(([iid,items])=>items.map(x=>({...x,intern_name:(d.interns.find(i=>i.id==iid)||{}).display_name||'Intern'})));
