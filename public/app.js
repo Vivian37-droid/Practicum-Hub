@@ -454,18 +454,40 @@ async function dashboard() {
   }
 
   const m = d.metrics;
-  const rows = (d.interns || []).map(x => {
-    const s = x.requirements;
-    const attention = s.at_risk_components ? 'Target at risk' : s.watch_components ? 'Watch' : 'On track';
-    return `<tr><td><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button><br><span class="muted">${esc(x.institution || 'Institution not set')}</span></td><td>${fmt(s.total_completed)} / ${fmt(s.total_target)}</td><td>${s.weeks_remaining == null ? '—' : fmt(s.weeks_remaining)}</td><td>${s.clinical_hours_needed_per_week == null ? '—' : fmt(s.clinical_hours_needed_per_week) + ' h/wk'}</td><td>${s.active_cases}</td><td>${tag(attention)}</td><td>${x.open_supervision}</td></tr>`;
-  }).join('');
-  $('#content').innerHTML = `<div class="hero"><h2>Supervise the programme before problems become end-of-placement crises.</h2><p>The dashboard now separates institutional requirements, calculates weekly pace, and flags when the current clinical allocation may be insufficient.</p><div class="actions"><button class="btn" data-go="interns">Manage interns</button><button class="btn" data-go="assistant">Open Practicum Assistant</button></div></div>
+  const all = (d.interns || []).reduce((a, x) => {
+    const s = x.snapshot || {};
+    a.referrals += Number(s.referrals_total || 0); a.attempts += Number(s.contact_attempts || 0);
+    a.attended += Number(s.attended_week || 0); a.outstanding += Number(s.outstanding || 0) + Number(s.awaiting_acceptance || 0);
+    return a;
+  }, { referrals: 0, attempts: 0, attended: 0, outstanding: 0 });
+  const cards = (d.interns || []).map(internSnapshotCard).join('');
+  $('#content').innerHTML = `<div class="action-head"><div><span class="eyebrow-dark">Supervisor overview</span><h2>Action Centre</h2><p>See what each intern has done, what is coming up and where follow-up is needed.</p></div><div class="action-filters"><button class="btn primary" data-go="referrals">Open referral tracker</button><button class="btn" data-go="daily">Daily check-ins</button></div></div>
+    <div class="grid metrics action-metrics">${metric('Patients referred', all.referrals, 'all active interns')}${metric('Contact attempts', all.attempts, 'recorded to date')}${metric('Attended this week', all.attended, 'individual sessions')}${metric('Needs attention', all.outstanding, 'referrals and supervision')}</div>
     ${queueCard(d.queue || [], d.interns || [])}
-    <div class="grid metrics">${metric('Active interns', m.interns)}${metric('Interns with target risk', m.at_risk)}${metric('Active cases', m.active_cases)}${metric('Open supervision', m.open_supervision)}</div>
-    <div class="section"><div><h3>Placement pace</h3><p>Click an intern to open their requirement profile.</p></div></div>${table(['Intern', 'Formal hours', 'Weeks left', 'Clinical pace needed', 'Cases', 'Requirements', 'Supervision'], rows)}`;
+    <div class="section action-section"><div><h3>Intern snapshots</h3><p>Live information from referrals, sessions, activity logs and weekly plans.</p></div><span class="tag">This week</span></div>
+    <div class="snapshot-grid">${cards || '<div class="card queue-empty">No active interns found.</div>'}</div>`;
   $$('[data-open]').forEach(btn => btn.onclick = () => { setActiveIntern(d.interns.find(i => i.id == btn.dataset.open)); go('overview'); });
+  $$('[data-open-referrals]').forEach(btn => btn.onclick = () => { setActiveIntern(d.interns.find(i => i.id == btn.dataset.openReferrals)); go('referrals'); });
   bindQueue(d.queue || [], d.interns || []);
   bindGo();
+}
+
+const weekDayName = n => ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][Number(n)] || '';
+function internSnapshotCard(x) {
+  const s = x.snapshot || {};
+  const attention = x.requirements?.at_risk_components ? 'Target at risk' : x.requirements?.watch_components ? 'Watch' : 'On track';
+  const upcoming = (s.upcoming_week || []).map(item => `<div class="snapshot-line"><span class="snapshot-date">${item.date ? esc(String(item.date).slice(5)) : weekDayName(item.weekday)}</span><div><b>${esc(item.title)}</b><small>${esc(item.site || item.kind || '')}</small></div></div>`).join('');
+  const alerts = [];
+  if (s.awaiting_acceptance) alerts.push(`${s.awaiting_acceptance} awaiting acceptance`);
+  if (s.no_response) alerts.push(`${s.no_response} awaiting a response`);
+  if (s.outstanding) alerts.push(`${s.outstanding} overdue/open actions`);
+  return `<article class="snapshot-card">
+    <div class="snapshot-title"><div><button type="button" class="row-open" data-open="${x.id}">${esc(x.display_name)}</button><small>${esc(x.institution || 'Institution not set')}</small></div>${tag(attention)}</div>
+    <div class="snapshot-band"><div><strong>${s.referrals_total || 0}</strong><span>referred</span></div><div><strong>${s.contact_attempts || 0}</strong><span>contact attempts</span></div><div><strong>${s.booked || 0}</strong><span>booked</span></div><div><strong>${s.attended_week || 0}</strong><span>attended this week</span></div></div>
+    <div class="snapshot-detail"><div><span>Accepted</span><b>${s.referrals_accepted || 0}</b></div><div><span>Patients contacted</span><b>${s.patients_contacted || 0}</b></div><div><span>DNA this week</span><b>${s.dna_week || 0}</b></div><div><span>Intakes / follow-ups</span><b>${s.intakes_week || 0} / ${s.followups_week || 0}</b></div></div>
+    <div class="snapshot-columns"><div><h4>Rest of the week</h4>${upcoming || '<p class="queue-empty">Nothing planned yet.</p>'}</div><div><h4>Needs attention</h4>${alerts.length ? alerts.map(a => `<div class="attention-line"><span></span>${esc(a)}</div>`).join('') : '<p class="queue-empty">Nothing outstanding.</p>'}</div></div>
+    <div class="snapshot-actions"><button class="btn small" data-open="${x.id}">Full overview</button><button class="btn small" data-open-referrals="${x.id}">View referrals</button></div>
+  </article>`;
 }
 
 // Prompt 6: an actionable queue of items that need attention — each one
@@ -1266,7 +1288,7 @@ function demo() { return {
 async function demoApi(path, options = {}) {
   const d=S.data,[route,qs='']=path.split('?'),q=new URLSearchParams(qs),method=options.method||'GET',body=options.body?JSON.parse(options.body):{},id=+(q.get('intern_id')||(S.session.role==='intern'?11:S.intern?.id||0));
   d.referrals ||= [];
-  if(route==='dashboard'){if(S.session.role==='intern')return{metrics:{active_cases:0,open_supervision:0},requirements:demoRequirement(11)};if(S.session.role==='management')return demoProgramme(d);const interns=d.interns.map(x=>({...x,requirements:demoRequirement(x.id).summary,requirement_profile_name:demoRequirement(x.id).profile.requirement_profile_name}));const atRisk=interns.reduce((n,p)=>n+(p.requirements.at_risk_components>0?1:0),0);return{interns,metrics:{interns:interns.length,active_cases:0,open_supervision:0,at_risk:atRisk}};}
+  if(route==='dashboard'){if(S.session.role==='intern')return{metrics:{active_cases:0,open_supervision:0},requirements:demoRequirement(11)};if(S.session.role==='management')return demoProgramme(d);const interns=d.interns.map(x=>({...x,requirements:demoRequirement(x.id).summary,requirement_profile_name:demoRequirement(x.id).profile.requirement_profile_name,snapshot:{referrals_total:12,referrals_open:9,referrals_accepted:10,awaiting_acceptance:2,contact_attempts:18,patients_contacted:9,no_response:2,booked:6,booked_week:7,attended_week:5,dna_week:2,intakes_week:2,followups_week:3,activities_week:3,hours_week:18.5,outstanding:2,upcoming_week:[{weekday:4,title:'Clinic day',site:'Idas Valley Clinic'},{weekday:5,title:'Campus day',site:'SACAP campus'}]}}));const atRisk=interns.reduce((n,p)=>n+(p.requirements.at_risk_components>0?1:0),0);return{interns,metrics:{interns:interns.length,active_cases:0,open_supervision:0,at_risk:atRisk},queue:[{severity:'amber',title:'Erin George: two referrals need follow-up',reason:'No successful contact has been recorded yet.',view:'referrals',intern_id:11}]};}
   if(route==='interns'){
     if(method==='PATCH'&&body.action==='resend_invite')return{ok:true,resent_id:+body.id};
     if(method==='PATCH'&&body.action==='reactivate')return{ok:true,reactivated_id:+body.id};

@@ -250,6 +250,9 @@ export async function dashboard(ctx, env) {
     const req = await requirementProgress(env, p.id);
     return { ...p, requirements: req.summary, requirement_profile_name: req.profile.requirement_profile_name };
   }));
+  const internIds = interns.map(p => p.id);
+  const snapshots = await buildInternSnapshots(admin, internIds);
+  interns = interns.map(p => ({ ...p, snapshot: snapshots[p.id] || emptyInternSnapshot() }));
   const metrics = interns.reduce((a, p) => ({
     interns: a.interns + 1,
     active_cases: a.active_cases + p.active_cases,
@@ -258,6 +261,79 @@ export async function dashboard(ctx, env) {
   }), { interns: 0, active_cases: 0, open_supervision: 0, at_risk: 0 });
   const queue = await buildQueue(env, ctx, interns, supervisorId);
   return { profile: ctx.profile, interns, metrics, queue };
+}
+
+function emptyInternSnapshot() {
+  return {
+    referrals_total: 0, referrals_open: 0, referrals_accepted: 0,
+    awaiting_acceptance: 0, contact_attempts: 0, patients_contacted: 0,
+    no_response: 0, booked: 0, attended_week: 0, booked_week: 0,
+    dna_week: 0, intakes_week: 0, followups_week: 0, activities_week: 0,
+    hours_week: 0, upcoming_week: [], outstanding: 0
+  };
+}
+
+// Compact operational read model for the supervisor's Action Centre. All
+// figures are derived from records already captured elsewhere in the Hub.
+async function buildInternSnapshots(admin, internIds) {
+  if (!internIds.length) return {};
+  const now = new Date();
+  const day = now.getUTCDay() || 7;
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - day + 1));
+  const nextMonday = new Date(monday); nextMonday.setUTCDate(nextMonday.getUTCDate() + 7);
+  const today = now.toISOString().slice(0, 10);
+  const weekStart = monday.toISOString().slice(0, 10);
+  const weekEnd = nextMonday.toISOString().slice(0, 10);
+  const [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes] = await Promise.all([
+    admin.from('referrals').select('intern_profile_id,status,contact_attempts,accepted_at,next_action_date').in('intern_profile_id', internIds),
+    admin.from('encounters').select('intern_profile_id,encounter_date,booked,attended,session_type').in('intern_profile_id', internIds).gte('encounter_date', weekStart).lt('encounter_date', weekEnd),
+    admin.from('hours').select('intern_profile_id,work_date,hours').in('intern_profile_id', internIds).gte('work_date', weekStart).lt('work_date', weekEnd),
+    admin.from('planned_activities').select('intern_profile_id,title,activity_date,site,status').in('intern_profile_id', internIds).gte('activity_date', today).lt('activity_date', weekEnd).order('activity_date'),
+    admin.from('weekly_schedule_items').select('intern_profile_id,weekday,title,site,start_time').in('intern_profile_id', internIds).eq('active', true).gte('weekday', day).order('weekday'),
+    admin.from('supervision_items').select('intern_profile_id,status').in('intern_profile_id', internIds).eq('status', 'Open')
+  ]);
+  for (const result of [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes]) {
+    if (result.error) throw new HttpError(500, result.error.message);
+  }
+  const out = Object.fromEntries(internIds.map(id => [id, emptyInternSnapshot()]));
+  for (const r of refsRes.data || []) {
+    const s = out[r.intern_profile_id]; if (!s) continue;
+    const closed = String(r.status || '').startsWith('Closed') || r.status === 'Reallocated';
+    s.referrals_total++;
+    if (!closed) s.referrals_open++;
+    if (r.accepted_at) s.referrals_accepted++; else if (!closed) s.awaiting_acceptance++;
+    s.contact_attempts += Number(r.contact_attempts || 0);
+    if (Number(r.contact_attempts || 0) > 0 || !['Allocated'].includes(r.status)) s.patients_contacted++;
+    if (!closed && Number(r.contact_attempts || 0) > 0 && r.status === 'Contact attempted') s.no_response++;
+    if (['Booked','Intake completed','Active','Awaiting feedback'].includes(r.status)) s.booked++;
+    if (!closed && r.next_action_date && r.next_action_date < today) s.outstanding++;
+  }
+  for (const e of encountersRes.data || []) {
+    const s = out[e.intern_profile_id]; if (!s) continue;
+    if (e.booked) s.booked_week++;
+    if (e.attended) {
+      s.attended_week++;
+      if (e.session_type === 'First') s.intakes_week++; else s.followups_week++;
+    } else if (e.booked) s.dna_week++;
+  }
+  for (const h of hoursRes.data || []) {
+    const s = out[h.intern_profile_id]; if (!s) continue;
+    s.activities_week++;
+    s.hours_week += Number(h.hours || 0);
+  }
+  for (const p of plannedRes.data || []) {
+    const s = out[p.intern_profile_id]; if (!s || String(p.status).toLowerCase() === 'completed') continue;
+    s.upcoming_week.push({ title: p.title, date: p.activity_date, site: p.site, kind: 'Planned activity' });
+  }
+  for (const item of scheduleRes.data || []) {
+    const s = out[item.intern_profile_id]; if (!s) continue;
+    s.upcoming_week.push({ title: item.title, weekday: item.weekday, site: item.site, time: item.start_time, kind: 'Schedule' });
+  }
+  for (const item of supervisionRes.data || []) {
+    const s = out[item.intern_profile_id]; if (s) s.outstanding++;
+  }
+  Object.values(out).forEach(s => { s.hours_week = round(s.hours_week, 1); s.upcoming_week = s.upcoming_week.slice(0, 4); });
+  return out;
 }
 
 // One read model for the Programme Lead's complete view of an intern. This
