@@ -251,7 +251,7 @@ export async function dashboard(ctx, env) {
     return { ...p, requirements: req.summary, requirement_profile_name: req.profile.requirement_profile_name };
   }));
   const internIds = interns.map(p => p.id);
-  const snapshots = await buildInternSnapshots(admin, internIds);
+  const snapshots = await buildInternSnapshots(admin, interns);
   interns = interns.map(p => ({ ...p, snapshot: snapshots[p.id] || emptyInternSnapshot() }));
   const metrics = interns.reduce((a, p) => ({
     interns: a.interns + 1,
@@ -275,8 +275,10 @@ function emptyInternSnapshot() {
 
 // Compact operational read model for the supervisor's Action Centre. All
 // figures are derived from records already captured elsewhere in the Hub.
-async function buildInternSnapshots(admin, internIds) {
+async function buildInternSnapshots(admin, interns) {
+  const internIds = interns.map(p => p.id);
   if (!internIds.length) return {};
+  const sessionHoursByIntern = Object.fromEntries(interns.map(p => [p.id, Math.max(0.25, Number(p.default_session_minutes || 60) / 60)]));
   const now = new Date();
   const day = now.getUTCDay() || 7;
   const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - day + 1));
@@ -287,7 +289,7 @@ async function buildInternSnapshots(admin, internIds) {
   const [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes] = await Promise.all([
     admin.from('referrals').select('intern_profile_id,status,contact_attempts,accepted_at,next_action_date').in('intern_profile_id', internIds),
     admin.from('encounters').select('intern_profile_id,encounter_date,booked,attended,session_type').in('intern_profile_id', internIds).gte('encounter_date', weekStart).lt('encounter_date', weekEnd),
-    admin.from('hours').select('intern_profile_id,work_date,hours,service_type').in('intern_profile_id', internIds).gte('work_date', weekStart).lt('work_date', weekEnd),
+    admin.from('hours').select('intern_profile_id,work_date,hours,service_type,component_code').in('intern_profile_id', internIds).gte('work_date', weekStart).lt('work_date', weekEnd),
     admin.from('planned_activities').select('intern_profile_id,title,activity_date,site,status').in('intern_profile_id', internIds).gte('activity_date', today).lt('activity_date', weekEnd).order('activity_date'),
     admin.from('weekly_schedule_items').select('intern_profile_id,weekday,title,site,start_time').in('intern_profile_id', internIds).eq('active', true).gte('weekday', day).order('weekday'),
     admin.from('supervision_items').select('intern_profile_id,status').in('intern_profile_id', internIds).eq('status', 'Open')
@@ -318,11 +320,12 @@ async function buildInternSnapshots(admin, internIds) {
   }
   for (const h of hoursRes.data || []) {
     const s = out[h.intern_profile_id]; if (!s) continue;
-    // Individual sessions can be recorded either against a case (encounters)
-    // or, when no case record exists, as an Activity Log entry. The UI warns
-    // against recording the same session in both places, so each manual
-    // Individual counselling row represents one additional attended session.
-    if (h.service_type === 'Individual counselling') s.attended_week++;
+    // Activity Log records store duration, not a separate session count. For
+    // manual individual-counselling records, translate the logged hours into
+    // session equivalents using that intern's configured session duration.
+    // component_code is included for older rows whose service_type is blank.
+    const individual = h.service_type === 'Individual counselling' || /individual|counselling/i.test(String(h.component_code || ''));
+    if (individual) s.attended_week += Math.max(1, Math.round(Number(h.hours || 0) / sessionHoursByIntern[h.intern_profile_id]));
     else s.activities_week++;
     s.hours_week += Number(h.hours || 0);
   }
