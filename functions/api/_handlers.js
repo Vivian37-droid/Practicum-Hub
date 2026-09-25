@@ -271,9 +271,21 @@ export async function weeklyPlan(ctx, env, url, body, method) {
   if (method === 'GET') {
     const start = url.searchParams.get('start') || new Date().toISOString().slice(0,10);
     const endDate = new Date(start + 'T00:00:00Z'); endDate.setUTCDate(endDate.getUTCDate()+7);
-    return unwrap(await admin.from('weekly_appointments').select('*').eq('intern_profile_id',id).gte('appointment_date',start).lt('appointment_date',endDate.toISOString().slice(0,10)).order('appointment_date').order('appointment_time'));
+    const [appointments,casesRes,facilitiesRes]=await Promise.all([
+      admin.from('weekly_appointments').select('*').eq('intern_profile_id',id).gte('appointment_date',start).lt('appointment_date',endDate.toISOString().slice(0,10)).order('appointment_date').order('appointment_time'),
+      admin.from('cases').select('id,case_code,site,status').eq('intern_profile_id',id).neq('status','Exited').order('case_code'),
+      admin.from('facilities').select('id,name,service_context').eq('active',true).order('name')
+    ]);
+    for(const r of [appointments,casesRes,facilitiesRes])if(r.error)throw new HttpError(500,r.error.message);
+    return {appointments:appointments.data,cases:casesRes.data,facilities:facilitiesRes.data};
   }
-  requireMethod(method, ['PATCH']);
+  requireMethod(method, ['POST','PATCH']);
+  if(method==='POST'){
+    const caseId=body.case_id?Number(body.case_id):null;
+    if(caseId){const c=unwrap(await admin.from('cases').select('id').eq('id',caseId).eq('intern_profile_id',id).single());if(!c)throw new HttpError(400,'Invalid case');}
+    const facility=unwrap(await admin.from('facilities').select('id,name').eq('id',Number(body.facility_id)).single());
+    return unwrap(await admin.from('weekly_appointments').insert({intern_profile_id:id,case_id:caseId,appointment_date:dateValue(body.appointment_date,'Appointment date'),appointment_time:body.appointment_time,site:facility.name,facility_id:facility.id,status:'Booked'}).select().single());
+  }
   const { data: current, error } = await admin.from('weekly_appointments').select('*').eq('id',Number(body.id)).maybeSingle();
   if (error) throw new HttpError(500,error.message);
   if (!current) throw new HttpError(404,'Appointment not found');
