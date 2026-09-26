@@ -314,20 +314,30 @@ export async function myService(ctx, env, url, body, method){
     const statuses=new Set(['Planned','Completed','Cancelled']);
     if(method==='POST'){
       const row={owner_identity_user_id:owner,service_date:dateValue(body.service_date,'Programme date'),facility_name:limited(body.facility_name,120,'Location or activity',true),service_focus:limited(body.service_focus,180,'Description'),schedule_status:statuses.has(body.schedule_status)?body.schedule_status:'Planned',sort_order:0,active:true};
-      return unwrap(await admin.from('service_schedule').insert(row).select().single());
+      const saved=unwrap(await admin.from('service_schedule').insert(row).select().single());
+      await audit(ctx,env,'create','service_schedule',saved.id,{service_date:saved.service_date,facility_name:saved.facility_name},ctx.profile.id);
+      return saved;
     }
     const id=Number(body.id);if(!Number.isInteger(id)||id<1)throw new HttpError(400,'Invalid programme entry');
     const current=unwrap(await admin.from('service_schedule').select('*').eq('id',id).eq('owner_identity_user_id',owner).single());
-    if(method==='DELETE')return unwrap(await admin.from('service_schedule').delete().eq('id',current.id).eq('owner_identity_user_id',owner).select().single());
+    if(method==='DELETE'){
+      const removed=unwrap(await admin.from('service_schedule').delete().eq('id',current.id).eq('owner_identity_user_id',owner).select().single());
+      await audit(ctx,env,'delete','service_schedule',removed.id,{service_date:removed.service_date,facility_name:removed.facility_name},ctx.profile.id);
+      return removed;
+    }
     const update={service_date:dateValue(body.service_date,'Programme date'),facility_name:limited(body.facility_name,120,'Location or activity',true),service_focus:limited(body.service_focus,180,'Description'),schedule_status:statuses.has(body.schedule_status)?body.schedule_status:'Planned'};
-    return unwrap(await admin.from('service_schedule').update(update).eq('id',current.id).eq('owner_identity_user_id',owner).select().single());
+    const saved=unwrap(await admin.from('service_schedule').update(update).eq('id',current.id).eq('owner_identity_user_id',owner).select().single());
+    await audit(ctx,env,'update','service_schedule',saved.id,{service_date:saved.service_date,facility_name:saved.facility_name,schedule_status:saved.schedule_status},ctx.profile.id);
+    return saved;
   }
   requireMethod(method,['POST']);
   const facility=unwrap(await admin.from('facilities').select('id,name').eq('id',Number(body.facility_id)).single());
   const number=k=>{const n=Number(body[k]||0);if(!Number.isInteger(n)||n<0||n>500)throw new HttpError(400,`Invalid ${k}`);return n};
   const row={owner_identity_user_id:owner,work_date:dateValue(body.work_date,'Work date'),facility_id:facility.id,facility_name:facility.name,booked:number('booked'),attended:number('attended'),female:number('female'),male:number('male'),other_gender:number('other_gender'),intake:number('intake'),follow_up:number('follow_up'),individual:number('individual'),group_sessions:number('group_sessions'),family_sessions:number('family_sessions'),community_activities:number('community_activities'),note:limited(body.note,500,'Note'),updated_at:new Date().toISOString()};
   if(row.attended>row.booked)throw new HttpError(400,'Attended cannot exceed booked');
-  return unwrap(await admin.from('service_statistics').upsert(row,{onConflict:'owner_identity_user_id,work_date,facility_name'}).select().single());
+  const saved=unwrap(await admin.from('service_statistics').upsert(row,{onConflict:'owner_identity_user_id,work_date,facility_name'}).select().single());
+  await audit(ctx,env,'upsert','service_statistics',saved.id,{work_date:saved.work_date,facility_name:saved.facility_name},ctx.profile.id);
+  return saved;
 }
 
 function emptyInternSnapshot() {

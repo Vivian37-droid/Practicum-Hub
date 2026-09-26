@@ -54,6 +54,18 @@ registerForm('fMilestone', e => saveMilestone(e));
 registerForm('fFeedback', async e => { const b = Object.fromEntries(new FormData(e.target)); b.context_view = S.view; try { await api('feedback', { method: 'POST', body: JSON.stringify(b) }); toast('Feedback saved'); go('feedback'); } catch (x) { toast(x.message); } });
 
 let S = { identity: null, session: null, view: 'dashboard', intern: null, preview: false, data: null, handbookSection: 0, assistantSeed: '', reportsMonth: null, dailyDate: null, refreshPromise: null };
+const IDLE_LIMIT_MS=30*60*1000,IDLE_WARNING_MS=28*60*1000;
+let idleLogoutTimer=null,idleWarningTimer=null,idleListenersBound=false;
+function resetIdleTimers(){
+  if(!S.session||S.preview)return;
+  clearTimeout(idleLogoutTimer);clearTimeout(idleWarningTimer);
+  idleWarningTimer=setTimeout(()=>toast('For your security, you will be signed out in 2 minutes unless you continue working.'),IDLE_WARNING_MS);
+  idleLogoutTimer=setTimeout(async()=>{try{await S.supabase?.auth.signOut()}finally{location.reload()}},IDLE_LIMIT_MS);
+}
+function startIdleProtection(){
+  if(!idleListenersBound){['pointerdown','keydown','touchstart','scroll'].forEach(name=>window.addEventListener(name,resetIdleTimers,{passive:true}));idleListenersBound=true;}
+  resetIdleTimers();
+}
 
 // Per-role nav labels (unchanged wording from before Prompt 6) — now grouped
 // under NAV_GROUPS instead of rendered as one flat list, per Prompt 6's
@@ -1381,7 +1393,7 @@ function authMessage(message, kind='danger'){
 }
 function authError(message){authMessage(message,'danger');}
 function showPasswordSetup(type){pendingAuthType=type;$('#login').classList.add('hidden');$('#setPassword').classList.remove('hidden');$('#setPasswordMessage').innerHTML=type==='recovery'?'<b>Choose a new password</b><br>Enter and confirm your new password.':'<b>Finish setting up your account</b><br>Create a password to accept your invitation.';}
-async function finishLogin(){const b=await api('bootstrap');S.session={profile:b.profile,role:b.role};restoreActiveIntern();shell();}
+async function finishLogin(){const b=await api('bootstrap');S.session={profile:b.profile,role:b.role};restoreActiveIntern();shell();startIdleProtection();}
 
 // Auth: Supabase Auth (supabase-js) replaces @netlify/identity. Invite and
 // password-recovery links both land back on this page with tokens in the
