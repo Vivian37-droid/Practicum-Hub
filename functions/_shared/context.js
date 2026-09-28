@@ -24,10 +24,22 @@ export async function context(request, env) {
   const admin = getAdmin(env);
   const email = cleanEmail(user.email);
 
-  const metadataRoles = user.app_metadata?.roles || user.user_metadata?.roles || [];
-  const role = leadEmails(env).has(email)
-    ? 'programme_lead'
-    : (['programme_lead', 'supervisor', 'management', 'intern'].find(r => metadataRoles.includes(r)) || 'intern');
+  // Authorization must never depend on user_metadata: an authenticated
+  // Supabase user may update that object themselves. Prefer the role already
+  // assigned in our server-controlled profile, then trusted app_metadata for
+  // first-time provisioning. New accounts default to the least-privileged
+  // intern role unless their email is in the programme-lead allowlist.
+  const { data: existingProfile, error: profileError } = await admin
+    .from('profiles')
+    .select('role, active')
+    .eq('identity_user_id', user.id)
+    .maybeSingle();
+  if (profileError) throw new HttpError(500, profileError.message);
+  const allowedRoles = ['programme_lead', 'supervisor', 'management', 'intern'];
+  const appRoles = Array.isArray(user.app_metadata?.roles) ? user.app_metadata.roles : [];
+  const storedRole = allowedRoles.includes(existingProfile?.role) ? existingProfile.role : null;
+  const appRole = allowedRoles.find(r => appRoles.includes(r)) || null;
+  const role = leadEmails(env).has(email) ? 'programme_lead' : (storedRole || appRole || 'intern');
 
   const profile = unwrap(await admin.rpc('app_context_upsert', {
     p_identity_user_id: user.id,

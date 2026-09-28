@@ -1,10 +1,20 @@
+Warning: truncated output (original token count: 43274)
+Total output lines: 1462
+
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
 const fmt = n => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 1 });
 const pc = (a, b) => b ? Math.min(100, Math.round(Number(a || 0) / Number(b) * 100)) : 0;
-const today = () => new Date().toISOString().slice(0, 10);
-const month = () => new Date().toISOString().slice(0, 7);
+const APP_TIME_ZONE = 'Africa/Johannesburg';
+const today = () => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: APP_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date()).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+const month = () => today().slice(0, 7);
+const addDays = (isoDate, days) => { const d = new Date(`${isoDate}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); };
 const statusClass = s => { const v=String(s||'').toLowerCase(); if(['complete','on track','reviewed','closed'].includes(v)||v.startsWith('closed')) return 'green'; if(v.includes('risk')||v==='required'||v==='target at risk'||v==='action needed'||v==='urgent') return 'red'; if(['watch','monitor','dates needed','due','important','priority','awaiting feedback','deactivated'].includes(v)) return 'amber'; return ''; };
 const responsibilityLabel = r => ({ site: 'Placement site', shared: 'Shared', campus: 'Campus / institution', 'information-only': 'Information only' }[r] || r || '—');
 
@@ -533,7 +543,7 @@ function bindQueue(items, interns) {
   });
 }
 
-function nextMonday(){const d=new Date(),day=d.getDay()||7;d.setDate(d.getDate()-day+8);return d.toISOString().slice(0,10)}
+function nextMonday(){const current=today(),day=new Date(`${current}T00:00:00Z`).getUTCDay()||7;return addDays(current,8-day)}
 async function weeklyPlan(){
   const switcherHtml=await internSwitcherHtml(); if(!needIntern(switcherHtml)){bindInternSwitcher();return}
   const start=S.weeklyStart||nextMonday(), payload=await api(`weekly-plan?intern_id=${activeId()}&start=${start}`),data=payload.appointments||[];
@@ -626,347 +636,7 @@ async function purgeIntern(e) {
   try {
     await api('interns', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
     clearActiveIntern(); closeModal(); toast('Test intern and linked records permanently deleted'); go('interns');
-  } catch (x) {
-    if (errorBox) { errorBox.textContent = x.message || 'The test intern could not be deleted.'; errorBox.classList.remove('hidden'); }
-    toast('Deletion failed — see the message in the form.');
-  }
-}
-
-function internPreviewMarkup(d) {
-  const req = d.requirements;
-  const activeCases = d.cases.filter(x => x.status !== 'Exited').length;
-  const openSupervision = d.supervision.filter(x => x.status === 'Open').length;
-  const outstandingMilestones = d.milestones.filter(x => !['Complete','Not applicable'].includes(x.status)).length;
-  return `<div class="notice info preview-banner"><b>Read-only intern preview:</b> This is the placement information ${esc(d.profile.display_name)} sees. No changes can be made from this preview. <button id="exitInternPreview" class="btn small">Return to Programme Lead view</button></div>
-    <div class="hero"><small>${esc(req.profile.requirement_profile_name || d.profile.institution || 'Placement')}</small><h2>Welcome, ${esc(d.profile.display_name)}.</h2><p>Your handbook, weekly plan, live requirements, supervision preparation and help when you are stuck — in one place.</p></div>
-    ${requirementSummaryCard(req)}
-    <div class="grid two" style="margin-top:14px">${weeklyScheduleCard(d.schedule)}${clinicalPaceCard(req)}</div>
-    <div class="card" style="margin-top:14px"><h3>Current workload</h3><div class="mini-grid"><div><small>Active cases</small><b>${activeCases}</b></div><div><small>Open supervision items</small><b>${openSupervision}</b></div><div><small>Placement milestones outstanding</small><b>${outstandingMilestones}</b></div><div><small>Expected attended sessions</small><b>${fmt(req.summary.expected_attended_sessions)}/wk</b></div></div></div>`;
-}
-
-async function internOverviewView() {
-  const switcherHtml = await internSwitcherHtml();
-  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
-  const id = activeId();
-  const d = await api(`intern-overview?intern_id=${id}`);
-  const activeCases = d.cases.filter(x => x.status !== 'Exited');
-  const openReferrals = d.referrals.filter(x => !String(x.status).startsWith('Closed'));
-  const overdueRefs = openReferrals.filter(x => referralDaysOverdue(x) > 0);
-  const openSupervision = d.supervision.filter(x => x.status === 'Open');
-  const completeMilestones = d.milestones.filter(x => x.status === 'Complete').length;
-  const referralRows = openReferrals.slice(0, 6).map(x => `<tr><td><b>${esc(x.referral_code)}</b></td><td>${tag(x.status)}</td><td>${esc(x.site || '—')}</td><td>${x.next_action_date ? esc(x.next_action_date) : '—'}</td></tr>`).join('');
-  const caseRows = activeCases.slice(0, 6).map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td>${tag(x.status)}</td><td>${esc(x.site || '—')}</td><td>${x.sessions || 0}</td></tr>`).join('');
-  const milestoneRows = d.milestones.map(x => `<tr><td><b>${esc(x.title)}</b></td><td>${x.due_date ? esc(x.due_date) : '—'}</td><td>${tag(x.status)}</td><td><button class="btn small" data-milestone="${x.id}">Update</button></td></tr>`).join('');
-  $('#content').innerHTML = switcherHtml + `<div class="hero"><small>${esc(d.profile.institution || 'Placement')}</small><h2>${esc(d.profile.display_name)} · complete placement view</h2><p>Account, referrals, cases, supervision, requirements and milestones in one operational view.</p><div class="actions"><button id="viewAsIntern" class="btn">View as ${esc(d.profile.display_name)}</button><button class="btn" data-go="supervision">Open supervision</button><button class="btn" data-go="progress">Review requirements</button></div></div>
-    <div class="grid metrics">${metric('Open referrals', openReferrals.length, `${overdueRefs.length} overdue`)}${metric('Active cases', activeCases.length)}${metric('Open supervision', openSupervision.length)}${metric('Milestones', `${completeMilestones}/${d.milestones.length}`, 'completed')}</div>
-    ${requirementSummaryCard(d.requirements)}
-    <div class="grid two" style="margin-top:14px">${weeklyScheduleCard(d.schedule)}${clinicalPaceCard(d.requirements)}</div>
-    <div class="section"><div><h3>Current referral journey</h3><p>Booked and intake-completed referrals flow automatically into Case Workflow.</p></div><button class="btn" data-go="referrals">Open all referrals</button></div>${table(['Code','Stage','Facility','Next action'], referralRows, 'No open referrals.')}
-    <div class="section"><div><h3>Active cases</h3><p>Linked to their originating referral wherever applicable.</p></div><button class="btn" data-go="cases">Open Case Workflow</button></div>${table(['Code','Status','Facility','Sessions'], caseRows, 'No active cases.')}
-    <div class="section"><div><h3>Placement milestones</h3><p>Orientation, evaluations, competencies, logbook verification and exit requirements.</p></div></div>${table(['Milestone','Due','Status',''], milestoneRows, 'No milestones configured.')}`;
-  bindInternSwitcher(); bindGo();
-  $('#viewAsIntern').onclick = () => { $('#content').innerHTML = internPreviewMarkup(d); $('#exitInternPreview').onclick = () => go('overview'); };
-  $$('[data-milestone]').forEach(b => b.onclick = () => milestoneModal(d.milestones.find(x => x.id == b.dataset.milestone), id));
-}
-
-function milestoneModal(x, internId) {
-  modal('Update placement milestone', `<form id="fMilestone" class="formgrid"><input type="hidden" name="id" value="${x.id}"><input type="hidden" name="intern_profile_id" value="${internId}"><div class="full"><b>${esc(x.title)}</b></div><div class="field"><label>Status<select name="status">${['Not started','In progress','Complete','Not applicable'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div><div class="field"><label>Due date<input name="due_date" type="date" value="${esc(x.due_date || '')}"></label></div><div class="full field"><label>Note<textarea name="note" maxlength="1000">${esc(x.note || '')}</textarea></label></div><div class="full"><button class="btn primary">Save milestone</button></div></form>`);
-}
-async function saveMilestone(e) { if (e.target.id !== 'fMilestone') return; e.preventDefault(); try { await api('milestones', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Milestone updated'); go('overview'); } catch (x) { toast(x.message); } }
-
-const REFERRAL_STATUSES = ['Allocated','Contact attempted','Contact made','Booked','Intake completed','Active','Awaiting feedback','Closed – completed','Closed – no contact','Reallocated'];
-const SITES = ['Stellenbosch Hospital','Stellenbosch Hospital OPD','Cloetesville CDC','Groendal Clinic','Khayamandi Clinic','Klapmuts Clinic','Idas Valley Clinic','Don & Pat Clinic','Jamestown Clinic','Night Shelter','SACAP campus','Cornerstone campus'];
-const siteOptions = (selected = '') => `<option value="">Select a site…</option>` + SITES.map(s => `<option ${s === selected ? 'selected' : ''}>${s}</option>`).join('') + `<option value="__other__" ${selected && !SITES.includes(selected) ? 'selected' : ''}>Other (type below)</option>`;
-const siteOtherField = (selected = '') => `<div class="field site-other${selected && !SITES.includes(selected) ? '' : ' hidden'}"><label>Other site name<input name="site_other" maxlength="120" value="${esc(selected && !SITES.includes(selected) ? selected : '')}"></label></div>`;
-function bindSiteToggle(form){const sel=form.querySelector('select[name="site"]');if(!sel)return;const other=form.querySelector('.site-other');const sync=()=>other?.classList.toggle('hidden',sel.value!=='__other__');sel.addEventListener('change',sync);sync();}
-function resolveSite(item){if(item.site==='__other__'){item.site=(item.site_other||'').trim();}delete item.site_other;return item;}
-const PRESENTING_CATEGORIES = ['Anxiety','Depression / low mood','Trauma / PTSD','Grief / bereavement','Substance use','Relationship / family','Child / adolescent behavioural','Psychosis / severe mental illness','Risk / suicidality','Adjustment / stress-related'];
-const presentingCategoryOptions = (selected = '') => `<option value="">Select a category…</option>` + PRESENTING_CATEGORIES.map(c => `<option ${c === selected ? 'selected' : ''}>${c}</option>`).join('') + `<option value="__other__" ${selected && !PRESENTING_CATEGORIES.includes(selected) ? 'selected' : ''}>Other (type below)</option>`;
-const presentingCategoryOtherField = (selected = '') => `<div class="field pc-other${selected && !PRESENTING_CATEGORIES.includes(selected) ? '' : ' hidden'}"><label>Other presenting category<input name="presenting_category_other" maxlength="120" value="${esc(selected && !PRESENTING_CATEGORIES.includes(selected) ? selected : '')}"></label></div>`;
-function bindPresentingCategoryToggle(form){const sel=form.querySelector('select[name="presenting_category"]');if(!sel)return;const other=form.querySelector('.pc-other');const sync=()=>other?.classList.toggle('hidden',sel.value!=='__other__');sel.addEventListener('change',sync);sync();}
-function resolvePresentingCategory(item){if(item.presenting_category==='__other__'){item.presenting_category=(item.presenting_category_other||'').trim();}delete item.presenting_category_other;return item;}
-const REFERRAL_UPDATE_CATEGORIES = ['Attempted contact – no response','Contact made – booking pending','Appointment booked','Attended – intake completed','No-show','Re-referred / closed','Awaiting supervisor feedback','Other – see note'];
-const referralUpdateCategoryOptions = (selected = '') => `<option value="">Select an update…</option>` + REFERRAL_UPDATE_CATEGORIES.map(c => `<option ${c === selected ? 'selected' : ''}>${c}</option>`).join('');
-// Prompt 8: "surface the next required action" — a plain-language next step
-// derived from the referral's own status, so a supervisor scanning the list
-// doesn't have to infer it themselves from the status tag alone.
-function referralNextAction(x) {
-  if (String(x.status).startsWith('Closed')) return 'None — closed';
-  return ({
-    'Allocated': 'Attempt first contact',
-    'Contact attempted': 'Follow up the contact attempt',
-    'Contact made': 'Schedule a booking',
-    'Booked': 'Confirm attendance / prepare intake',
-    'Intake completed': 'Begin ongoing sessions',
-    'Active': 'Continue sessions and monitor progress',
-    'Awaiting feedback': 'Follow up for feedback',
-    'Reallocated': 'Confirm the new allocation'
-  })[x.status] || 'Review current status';
-}
-const REFERRAL_SORTS = {
-  next_action_asc: { label: 'Next action (soonest first)', cmp: (a, b) => (a.next_action_date || '9999-99-99').localeCompare(b.next_action_date || '9999-99-99') },
-  overdue_desc: { label: 'Most overdue first', cmp: (a, b) => referralDaysOverdue(b) - referralDaysOverdue(a) },
-  code_asc: { label: 'Code (A–Z)', cmp: (a, b) => String(a.referral_code).localeCompare(String(b.referral_code)) },
-  priority_desc: { label: 'Priority (highest first)', cmp: (a, b) => ({ Urgent: 2, Priority: 1, Routine: 0 }[b.priority] || 0) - ({ Urgent: 2, Priority: 1, Routine: 0 }[a.priority] || 0) }
-};
-function referralDaysOverdue(x) {
-  if (!x.next_action_date || String(x.status).startsWith('Closed')) return -Infinity;
-  return Math.floor((new Date(today()) - new Date(x.next_action_date)) / 86400000);
-}
-async function referrals() {
-  const own = S.session.role === 'intern', query = own ? 'referrals' : (S.intern?.id ? `referrals?intern_id=${S.intern.id}` : 'referrals');
-  const [data, internsData] = await Promise.all([api(query), own ? Promise.resolve([]) : api('interns')]);
-  const isAdmin = S.session.role === 'programme_lead';
-  const sites = [...new Set(data.map(x => x.site).filter(Boolean))].sort();
-  const statuses = [...new Set(data.map(x => x.status).filter(Boolean))].sort();
-  const internNames = own ? [] : [...new Set(data.map(x => x.intern_name).filter(Boolean))].sort();
-  const filters = { q: '', status: '', site: '', intern: '', overdueOnly: false, sort: 'next_action_asc' };
-
-  const rowHtml = x => {
-    const daysOverdue = referralDaysOverdue(x);
-    const nextActionCell = x.next_action_date
-      ? `${esc(x.next_action_date)}${daysOverdue > 0 ? `<br><span class="tag red">${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue</span>` : ''}`
-      : '—';
-    const accepted = x.accepted_at ? `${tag('Accepted')}<br><small class="muted">${esc(new Date(x.accepted_at).toLocaleDateString())}</small>` : (own ? `<button class="btn small primary" data-accept-referral="${x.id}">Accept</button>` : tag('Awaiting acceptance'));
-    return `<tr><td><b>${esc(x.referral_code)}</b></td>${own ? '' : `<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Allocated">${esc(x.referral_date)}</td><td data-label="Acknowledged">${accepted}</td><td class="mobile-secondary" data-label="Source">${esc(x.referral_source || '—')}</td><td class="mobile-secondary" data-label="Site">${esc(x.site || '—')}</td><td class="mobile-secondary" data-label="Category">${esc(x.presenting_category || '—')}</td><td data-label="Priority">${tag(x.priority)}</td><td data-label="Status">${tag(x.status)}</td><td class="mobile-secondary" data-label="Attempts">${x.contact_attempts}</td><td data-label="Next action">${nextActionCell}</td><td data-label="Next required action"><small>${esc(referralNextAction(x))}</small></td><td class="mobile-secondary" data-label="Latest update">${x.update_category ? tag(x.update_category) : '—'}${x.last_update ? `<br><small class="muted">${esc(x.last_update)}</small>` : ''}</td><td><button class="btn small" data-referral-update="${x.id}" aria-label="Update referral ${esc(x.referral_code)}">Update</button>${isAdmin ? ` <button class="btn small danger-btn" data-del-referral="${x.id}" data-code="${esc(x.referral_code)}" aria-label="Delete referral ${esc(x.referral_code)}">Delete</button>` : ''}</td><td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`;
-  };
-
-  const draw = () => {
-    let filtered = data.filter(x => {
-      if (filters.status && x.status !== filters.status) return false;
-      if (filters.site && x.site !== filters.site) return false;
-      if (filters.intern && x.intern_name !== filters.intern) return false;
-      if (filters.overdueOnly && referralDaysOverdue(x) <= 0) return false;
-      if (filters.q) {
-        const hay = `${x.referral_code} ${x.site || ''} ${x.presenting_category || ''} ${x.intern_name || ''} ${x.last_update || ''}`.toLowerCase();
-        if (!hay.includes(filters.q.toLowerCase())) return false;
-      }
-      return true;
-    });
-    filtered.sort(REFERRAL_SORTS[filters.sort].cmp);
-    $('#refTableWrap').innerHTML = table(['Code', ...(own ? [] : ['Intern']), 'Allocated', 'Acknowledged', 'Source', 'Site', 'Category', 'Priority', 'Status', 'Attempts', 'Next action', 'Next required action', 'Latest update', ''], filtered.map(rowHtml).join(''), data.length ? 'No referrals match these filters.' : 'No referrals have been added yet.');
-    $$('[data-accept-referral]').forEach(b => b.onclick = async () => { try { await api('referrals', { method: 'PATCH', body: JSON.stringify({ id: b.dataset.acceptReferral, action: 'accept' }) }); toast('Referral accepted'); go('referrals'); } catch (x) { toast(x.message); } });
-    $$('[data-referral-update]').forEach(b => b.onclick = () => referralModal(data.find(x => x.id == b.dataset.referralUpdate), internsData));
-    $$('[data-del-referral]').forEach(b => b.onclick = () => adminDelete('referrals', b.dataset.delReferral, `referral ${b.dataset.code}`, () => go('referrals'), {
-      message: `This permanently deletes referral ${esc(b.dataset.code)} unless undone. It can be restored from the confirmation toast right after deleting.`,
-      reason: { required: false, label: 'Reason (optional)' },
-      restorePath: 'audit-restore'
-    }));
-    bindRowExpand();
-  };
-
-  const open = data.filter(x => !String(x.status).startsWith('Closed')).length;
-  const overdue = data.filter(x => referralDaysOverdue(x) > 0).length;
-  $('#content').innerHTML = `<div class="hero"><small>De-identified workflow</small><h2>${own ? 'Track the referrals allocated to you.' : 'See what happened after each referral was allocated.'}</h2><p>Record contact progress, booking, intake and closure so referrals do not disappear from view.</p><div class="actions"><button id="addReferral" class="btn">Add referral</button></div></div>
-    <div class="grid metrics">${metric('Open referrals', open)}${metric('Overdue next actions', overdue)}${metric('Total tracked', data.length)}${metric('Awaiting feedback', data.filter(x => x.status === 'Awaiting feedback').length)}</div>
-    <div class="section"><div><h3>${own ? 'My referral list' : S.intern ? esc(S.intern.display_name) + ' · referrals' : 'All intern referrals'}</h3><p>Status and a short operational update are visible to the intern and supervisor.</p></div></div>
-    <div class="card" style="margin-bottom:14px"><div class="formgrid">
-      <div class="field"><label>Search<input id="refSearch" placeholder="Code, site, category…"></label></div>
-      <div class="field"><label>Status<select id="refStatus"><option value="">All statuses</option>${statuses.map(s => `<option>${esc(s)}</option>`).join('')}</select></label></div>
-      <div class="field"><label>Facility<select id="refSite"><option value="">All facilities</option>${sites.map(s => `<option>${esc(s)}</option>`).join('')}</select></label></div>
-      ${own ? '' : `<div class="field"><label>Intern<select id="refIntern"><option value="">All interns</option>${internNames.map(n => `<option>${esc(n)}</option>`).join('')}</select></label></div>`}
-      <div class="field"><label>Sort by<select id="refSort">${Object.entries(REFERRAL_SORTS).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('')}</select></label></div>
-      <div class="field" style="align-self:end"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;font-weight:600"><input id="refOverdueOnly" type="checkbox" style="width:auto;min-height:0"> Overdue only</label></div>
-    </div></div>
-    <div id="refTableWrap"></div>
-    <div class="notice info" style="margin-top:12px">Do not enter patient names, ID numbers, phone numbers, addresses or clinical narrative. Keep clinical documentation in the approved patient record.</div>`;
-  $('#addReferral').onclick = () => referralModal(null, internsData);
-  $('#refSearch').oninput = e => { filters.q = e.target.value; draw(); };
-  $('#refStatus').onchange = e => { filters.status = e.target.value; draw(); };
-  $('#refSite').onchange = e => { filters.site = e.target.value; draw(); };
-  $('#refIntern')?.addEventListener('change', e => { filters.intern = e.target.value; draw(); });
-  $('#refSort').onchange = e => { filters.sort = e.target.value; draw(); };
-  $('#refOverdueOnly').onchange = e => { filters.overdueOnly = e.target.checked; draw(); };
-  draw();
-}
-function referralModal(item, internsData) {
-  const isEdit=!!item, own=S.session.role==='intern';
-  const internOptions=internsData.map(x=>`<option value="${x.id}" ${item?.intern_profile_id==x.id?'selected':''}>${esc(x.display_name)}</option>`).join('');
-  modal(isEdit?'Update referral':'Add referral',`<form id="fReferral" class="formgrid">${isEdit?`<input type="hidden" name="id" value="${item.id}">`:''}
-    ${!own&&!isEdit?`<div class="field"><label>Intern<select name="intern_profile_id" required><option value="">Select intern</option>${internOptions}</select></label></div>`:''}
-    ${!isEdit?`<div class="field"><label>De-identified referral code<input name="referral_code" placeholder="e.g. EG-024" maxlength="50" required></label></div><div class="field"><label>Date allocated<input name="referral_date" type="date" value="${today()}" required></label></div><div class="field"><label>Referral source<select name="referral_source"><option>CAReS</option><option>Tuesday allocation</option><option>Social worker</option><option>Inpatient team</option><option>Clinic</option><option>Other</option></select></label></div><div class="field"><label>Site<select name="site">${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Presenting category<select name="presenting_category">${presentingCategoryOptions()}</select></label></div>${presentingCategoryOtherField()}`:''}
-    <div class="field"><label>Priority<select name="priority">${['Routine','Priority','Urgent'].map(x=>`<option ${item?.priority===x?'selected':''}>${x}</option>`).join('')}</select></label></div>
-    <div class="field"><label>Status<select name="status">${REFERRAL_STATUSES.map(x=>`<option ${item?.status===x?'selected':''}>${x}</option>`).join('')}</select></label></div>
-    <div class="field"><label>Contact attempts<input name="contact_attempts" type="number" min="0" max="100" value="${item?.contact_attempts||0}"></label></div><div class="field"><label>Next action date<input name="next_action_date" type="date" value="${item?.next_action_date||''}"></label></div>
-    <div class="full field"><label>Operational update<select name="update_category">${referralUpdateCategoryOptions(item?.update_category||'')}</select></label></div>
-    <div class="full"><label>Additional detail (optional)<textarea name="last_update" maxlength="1000" placeholder="e.g. Appointment booked for 22 September">${esc(item?.last_update||'')}</textarea></label></div><div class="full"><button class="btn primary">${isEdit?'Save update':'Add referral'}</button></div></form>`);
-    bindSiteToggle($('#fReferral'));
-    bindPresentingCategoryToggle($('#fReferral'));
-}
-async function saveReferral(e){if(e.target.id!=='fReferral')return;e.preventDefault();const item=resolvePresentingCategory(resolveSite(Object.fromEntries(new FormData(e.target))));try{await api('referrals',{method:item.id?'PATCH':'POST',body:JSON.stringify(item)});closeModal();const linked=['Booked','Intake completed','Active','Awaiting feedback'].includes(item.status);toast(linked?'Referral saved · available in Case Workflow':item.id?'Referral updated':'Referral added');go('referrals');}catch(x){toast(x.message);}}
-
-async function requirementsView() {
-  const switcherHtml = await internSwitcherHtml();
-  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
-  const id = activeId(), req = await api(`requirements?intern_id=${id}`), s = req.summary;
-  const canSetOpening = S.session.role !== 'intern' && S.session.role !== 'management';
-  const isAdmin = S.session.role === 'programme_lead';
-  const pilot = S.session.role !== 'management' ? await api(`pilot-context?intern_id=${id}`) : null;
-  const rows = req.components.filter(x => x.calculation_mode !== 'deliverable').map(x => `<tr><td><b>${esc(x.name)}</b><br><span class="muted">${responsibilityLabel(x.responsibility)}</span></td><td class="mobile-secondary" data-label="Completed">${fmt(x.completed)} / ${fmt(x.target_hours)}${x.opening_balance ? `<br><small class="muted">Opening balance: ${fmt(x.opening_balance)} h</small>` : ''}</td><td data-label="Progress">${progressBar(x.completed, x.target_hours)}<small>${pc(x.completed, x.target_hours)}%</small></td><td class="mobile-secondary" data-label="Remaining">${fmt(x.remaining)}</td><td class="mobile-secondary" data-label="Needed / week">${x.needed_per_week == null ? '—' : fmt(x.needed_per_week) + ' h/wk'}</td><td data-label="Projected">${x.projected_completion == null ? '—' : fmt(x.projected_completion)}</td><td data-label="Status">${tag(x.status)}</td>${canSetOpening ? `<td class="mobile-secondary" data-label="Existing hours"><button class="btn small" data-opening="${x.id}">Opening balance</button></td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`).join('');
-  const deliverables = req.components.filter(x => x.calculation_mode === 'deliverable');
-  $('#content').innerHTML = switcherHtml + `<div class="hero"><small>${esc(req.profile.requirement_profile_name || '')}</small><h2>${S.session.role === 'intern' ? 'Your requirement profile' : esc(req.profile.display_name) + ' · requirement profile'}</h2><p>The 720-hour programme is broken into the categories required by the intern’s institution. Campus/institution components remain visible without making the placement site responsible for producing them.</p><div class="actions"><button class="btn" data-go="hours">Log non-session activity</button><button class="btn" data-go="cases">Record counselling activity</button><button class="btn" data-go="assistant">Ask about my progress</button></div></div>
-    ${requirementSummaryCard(req)}
-    ${s.source_audit ? `<div class="notice amber" style="margin-top:14px"><b>Imported logbook audit:</b> The institutional sheet displays <b>${fmt(s.source_audit.sheet_displayed_total)} h</b>, while <b>${fmt(s.source_audit.evidence_backed_total)} h</b> is currently supported by student-signed rows. <b>${fmt(s.source_audit.unconfirmed_prefilled_hours)} h</b> appears in pre-filled rows without the student signature and has not been counted as completed in this pilot. ${s.source_audit.data_quality_note ? esc(s.source_audit.data_quality_note) : ''}</div>` : ''}
-    ${clinicalPaceCard(req)}
-    <details class="card" style="margin-top:14px"><summary style="cursor:pointer;font-weight:800">How the target works</summary><div style="margin-top:10px"><p>Remaining hours ÷ remaining placement weeks gives the weekly pace required. Counselling is translated into equivalent attended sessions and a booking target adjusted for the intern’s actual attendance rate.</p><p class="muted">Individual counselling activity is derived from attended case sessions and their duration. This avoids logging the same clinical time twice.</p>${canSetOpening ? '<p class="muted">For interns already mid-placement, use <b>Opening balance</b> once to carry across hours already completed in their institutional logbook. New Hub activity is then added from that point forward.</p>' : ''}</div></details>
-    <div class="section"><div><h3>Formal requirements</h3><p>Verified SACAP / Cornerstone categories.</p></div></div>${table(['Requirement', 'Completed', 'Progress', 'Remaining', 'Needed / week', 'Projected', 'Status', ...(canSetOpening ? ['Existing hours'] : [])], rows)}
-    ${deliverables.length ? `<div class="section"><div><h3>Required deliverables</h3><p>Tracked as completion tasks rather than invented hour values.</p></div></div><div class="card list">${deliverables.map(d => `<div class="row"><div class="grow"><b>${esc(d.name)}</b><br><small class="muted">${responsibilityLabel(d.responsibility)}</small></div><select data-deliverable="${d.id}" aria-label="Status for ${esc(d.name)}"><option ${d.deliverable_status === 'Not started' ? 'selected' : ''}>Not started</option><option ${d.deliverable_status === 'In progress' ? 'selected' : ''}>In progress</option><option ${d.deliverable_status === 'Complete' ? 'selected' : ''}>Complete</option></select></div>`).join('')}</div>` : ''}
-    ${pilot ? `<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:800;padding:8px 0">Weekly schedule</summary><div style="margin-top:6px">${weeklyScheduleCard(pilot.schedule, isAdmin, id)}</div></details>` : ''}
-    <div class="notice info" style="margin-top:14px"><b>Verified requirement profile:</b> ${esc(req.profile.requirement_profile_name || 'Generic')}. Hour targets are based on the supplied 2026 source material. Site/shared/campus responsibility labels are operational programme classifications and can be adjusted if the institutions specify a different split.</div>`;
-  bindGo();
-  bindInternSwitcher();
-  $$('[data-deliverable]').forEach(sel => sel.onchange = async () => { await api('requirements', { method: 'PATCH', body: JSON.stringify({ intern_profile_id: id, component_id: +sel.dataset.deliverable, status: sel.value }) }); toast('Deliverable updated'); });
-  $$('[data-opening]').forEach(btn => btn.onclick = () => openingBalanceModal(req.components.find(x => x.id == btn.dataset.opening), id));
-  $('#editSchedule')?.addEventListener('click', () => scheduleModal(id));
-  $$('[data-del-schedule]').forEach(b => b.onclick = () => adminDelete('pilot-context', b.dataset.delSchedule, 'placement day', () => go('progress')));
-  bindRowExpand();
-}
-function openingBalanceModal(component, id) {
-  modal('Existing hours · ' + component.name, `<form id="fOpening"><input type="hidden" name="intern_profile_id" value="${id}"><input type="hidden" name="component_id" value="${component.id}"><input type="hidden" name="action" value="opening_balance"><div class="field"><label>Hours already completed before Hub tracking<input name="hours" type="number" min="0" max="2000" step="0.25" value="${component.opening_balance || 0}" required></label></div><div class="field"><label>Source / note<textarea name="note">${esc(component.opening_balance_note || 'Opening balance from existing institutional logbook')}</textarea></label></div><div class="notice info">Use this once when bringing an existing intern into the Hub. It contributes to total progress but is not counted as activity in the current month.</div><button class="btn primary">Save opening balance</button></form>`);
-  }
-async function saveOpeningBalance(e) {
-  if (e.target.id !== 'fOpening') return;
-  e.preventDefault();
-  try {
-    await api('requirements', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
-    closeModal(); toast('Opening balance saved'); go('progress');
-  } catch (x) { toast(x.message); }
-}
-
-async function cases() {
-  const switcherHtml = await internSwitcherHtml({ allowAll: true });
-  const id = activeId(), query = id ? `cases?intern_id=${id}` : 'cases', data = await api(query);
-  const canPlan = ['programme_lead', 'supervisor'].includes(S.session.role);
-  const isAdmin = S.session.role === 'programme_lead';
-  const rows = data.map(x => `<tr><td><b>${esc(x.case_code)}</b></td><td data-label="Site">${esc(x.site)}</td>${id ? '' : `<td data-label="Intern">${esc(x.intern_name)}</td>`}<td class="mobile-secondary" data-label="Category">${esc(x.presenting_category || '—')}</td><td data-label="Sessions">${x.sessions}</td><td class="mobile-secondary" data-label="Planned frequency">${canPlan ? `<select data-frequency="${x.id}" aria-label="Planned frequency for case ${esc(x.case_code)}"><option value="1" ${Number(x.planned_frequency_weeks) === 1 ? 'selected' : ''}>Weekly</option><option value="2" ${Number(x.planned_frequency_weeks) === 2 ? 'selected' : ''}>Fortnightly</option><option value="4" ${Number(x.planned_frequency_weeks) === 4 ? 'selected' : ''}>Monthly</option></select>` : ({1:'Weekly',2:'Fortnightly',4:'Monthly'}[Number(x.planned_frequency_weeks)] || `Every ${fmt(x.planned_frequency_weeks)} weeks`)}</td><td class="mobile-secondary" data-label="Supervision">${tag(x.supervision_status)}</td><td data-label="Status"><select data-status="${x.id}" aria-label="Status for case ${esc(x.case_code)}">${['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited'].map(s => `<option ${s === x.status ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><button class="btn" data-act="${x.id}" aria-label="Record counselling activity for case ${esc(x.case_code)}">Record session</button></td>${isAdmin ? `<td><button class="btn small danger-btn" data-del-case="${x.id}" data-code="${esc(x.case_code)}" data-sessions="${x.sessions}" aria-label="Delete case ${esc(x.case_code)}">Delete</button></td>` : ''}<td class="mobile-toggle"><button type="button" class="row-expand" aria-expanded="false">More details</button></td></tr>`).join('');
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${S.session.role === 'intern' ? 'My cases' : id ? esc(S.intern.display_name) + ' · cases' : 'All cases'}</h2><p>De-identified workflow. Frequency feeds the caseload adequacy calculation.</p></div>${['programme_lead', 'supervisor'].includes(S.session.role) && id ? '<button id="addCase" class="btn primary">Allocate case</button>' : ''}</div>
-    ${table(['Case code', 'Site', ...(id ? [] : ['Intern']), 'Category', 'Sessions', 'Planned frequency', 'Supervision', 'Status', 'Activity', ...(isAdmin ? ['Admin'] : [])], rows)}
-    <div class="notice info" style="margin-top:12px">Individual counselling hours are calculated from attended session duration. Do not enter patient names, ID numbers, phone numbers, addresses or narrative clinical notes.</div>`;
-  bindInternSwitcher();
-  $$('[data-status]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.status, status: sel.value }) }); toast('Status updated'); });
-  $$('[data-frequency]').forEach(sel => sel.onchange = async () => { await api('cases', { method: 'PATCH', body: JSON.stringify({ id: +sel.dataset.frequency, planned_frequency_weeks: +sel.value }) }); toast('Frequency updated'); });
-  $$('[data-act]').forEach(b => b.onclick = () => activityModal(data.find(x => x.id == b.dataset.act)));
-  $$('[data-del-case]').forEach(b => b.onclick = () => {
-    const sessions = Number(b.dataset.sessions || 0);
-    adminDelete('cases', b.dataset.delCase, `case ${b.dataset.code}`, () => go('cases'), {
-      message: `This permanently deletes case ${esc(b.dataset.code)}${sessions ? ` and its ${sessions} recorded session${sessions === 1 ? '' : 's'}` : ''}. This cannot be undone.`,
-      reason: { required: true, label: 'Reason for deleting' }
-    });
-  });
-  $('#addCase')?.addEventListener('click', () => { modal('Allocate de-identified case', `<form id="fCase" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Case code<input name="case_code" placeholder="KHC-026" required></label></div><div class="field"><label>Site<select name="site" required>${siteOptions()}</select></label></div>${siteOtherField()}<div class="field"><label>Presenting category<select name="presenting_category">${presentingCategoryOptions()}</select></label></div>${presentingCategoryOtherField()}<div class="field"><label>Planned frequency<select name="planned_frequency_weeks"><option value="1">Weekly</option><option value="2">Fortnightly</option><option value="4">Monthly</option></select></label></div><div class="full"><button class="btn primary">Allocate</button></div></form>`, 'case allocation'); bindSiteToggle($('#fCase')); bindPresentingCategoryToggle($('#fCase')); });
-  bindRowExpand();
-}
-async function saveCase(e) { if (e.target.id !== 'fCase') return; e.preventDefault(); try { await api('cases', { method: 'POST', body: JSON.stringify(resolvePresentingCategory(resolveSite(Object.fromEntries(new FormData(e.target))))) }); closeModal(); toast('Case allocated'); go('cases'); } catch (x) { toast(x.message); } }
-function activityModal(c, selectedDate = today(), returnView = 'cases') { modal('Record counselling activity · ' + c.case_code, `<form id="fActivity" class="formgrid" data-return-view="${esc(returnView)}"><input type="hidden" name="intern_profile_id" value="${c.intern_profile_id}"><input type="hidden" name="case_id" value="${c.id}"><div class="field"><label>Date<input name="encounter_date" type="date" value="${esc(selectedDate)}" required></label></div><div class="field"><label>Session<select name="session_type"><option>Intake</option><option>Follow-up</option><option>Termination</option></select></label></div><div class="field"><label>Booked<select name="booked"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Attended<select name="attended"><option value="true">Yes</option><option value="false">No</option></select></label></div><div class="field"><label>Duration if attended (minutes)<input name="duration_minutes" type="number" min="1" max="480" value="60"></label></div><div class="field"><label>Gender for monthly statistics<select name="patient_gender"><option>Female</option><option>Male</option><option>Other</option><option>Unknown</option></select></label></div><div class="full"><button class="btn primary">Save activity</button></div></form>`); }
-async function saveActivity(e) { if (e.target.id !== 'fActivity') return; e.preventDefault(); const returnView = e.target.dataset.returnView || 'cases'; try { await api('encounters', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Session recorded'); go(returnView); } catch (x) { toast(x.message); } }
-
-async function daily() {
-  const switcherHtml = await internSwitcherHtml();
-  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
-  const id = activeId(), selectedDate = S.dailyDate || today();
-  const [data, hoursData] = await Promise.all([api(`daily-summary?intern_id=${id}&date=${selectedDate}`), api(`hours?intern_id=${id}`)]);
-  const s = data.stats || {};
-  const missingGender = Number(s.not_recorded_gender || 0);
-  const sessionRows = (data.encounters || []).map(x => `<div class="row"><div class="grow"><b>${esc(x.case_code || 'De-identified case')}</b><br><small class="muted">${esc(x.session_type)} · ${x.booked ? 'Booked' : 'Not booked'} · ${x.attended ? `Attended · ${fmt(x.duration_minutes)} min · ${esc(x.patient_gender || 'Unknown')}` : 'Did not attend'} · ${esc(x.site || 'Facility not recorded')}</small></div>${tag(x.attended ? 'Attended' : 'DNA')}</div>`).join('');
-  const activityRows = (data.activities || []).map(x => `<div class="row"><div class="grow"><b>${esc(x.service_type || x.category)}</b><br><small class="muted">${esc(x.category)} · ${esc(x.site || 'Facility not recorded')}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b></div>`).join('');
-  $('#content').innerHTML = switcherHtml + `<div class="hero"><small>Daily close-out</small><h2>How was today?</h2><p>Record today’s work once. The totals below come from the same case sessions and activity entries used in Reports and practicum-hour calculations.</p><div class="actions"><button id="dailySession" class="btn">Record individual session</button><button id="dailyOther" class="btn">Log another activity</button></div></div>
-    <div class="section"><div><h3>Daily summary</h3><p>Choose a date to review or complete.</p></div><div class="field" style="min-width:180px"><label>Date<input id="dailyDate" type="date" value="${esc(selectedDate)}"></label></div></div>
-    <div class="grid three">${metric('Booked', s.booked || 0)}${metric('Attended', s.attended || 0)}${metric('Did not attend', s.did_not_attend || 0)}${metric('Female', s.female || 0)}${metric('Male', s.male || 0)}${metric('Intake sessions', s.intake_sessions || 0)}${metric('Follow-up sessions', s.follow_up_sessions || 0)}${metric('Counselling time', `${fmt((s.counselling_minutes || 0) / 60)} h`)}${metric('Other activities', (data.activities || []).length)}</div>
-    ${missingGender ? `<div class="notice amber" style="margin-top:14px"><b>Complete today’s records:</b> ${missingGender} attended session${missingGender === 1 ? ' has' : 's have'} no gender recorded.</div>` : ''}
-    <div class="grid two" style="margin-top:14px"><div><div class="section"><h3>Individual counselling</h3></div><div class="card list">${sessionRows || 'No individual sessions recorded for this date.'}</div></div><div><div class="section"><h3>Other practicum activity</h3></div><div class="card list">${activityRows || 'No additional activities recorded for this date.'}</div></div></div>
-    <div class="notice info" style="margin-top:14px"><b>No duplicate capture:</b> individual sessions recorded here are saved in Case workflow and counted automatically. The Activity form includes Individual, Group and Family counselling; use Individual there only when the session is not already recorded against a case.</div>`;
-  bindInternSwitcher();
-  $('#dailyDate').onchange = e => { S.dailyDate = e.target.value; go('daily'); };
-  $('#dailySession').onclick = () => {
-    if (!(data.cases || []).length) return toast('No active case is available. Add or activate a case first.');
-    modal('Choose a case', `<div class="card list">${data.cases.map(c => `<button class="btn" data-daily-case="${c.id}">${esc(c.case_code)} · ${esc(c.site)}</button>`).join('')}</div>`);
-    $$('[data-daily-case]').forEach(b => b.onclick = () => activityModal(data.cases.find(c => c.id == b.dataset.dailyCase), selectedDate, 'daily'));
-  };
-  $('#dailyOther').onclick = () => activityHoursModal(id, hoursData.components, selectedDate, 'daily');
-}
-
-// §4 gap fix: when a programme_lead/supervisor hasn't picked an intern from
-// the switcher, show the cross-intern feed instead of just "select an
-// intern first" — there was previously no bird's-eye view of open
-// supervision items across the whole programme at all.
-async function supervisionAllView(switcherHtml) {
-  const data = await api('supervision-feed');
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>All interns · supervision</h3><p>Open and recently reviewed supervision items across every intern you can see.</p></div></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.intern_name)}</b> · <b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}<br><span>${esc(x.question)}</span>${x.supervisor_note ? `<br><small><b>Supervisor:</b> ${esc(x.supervisor_note)}</small>` : ''}</div>${tag(x.priority)} ${tag(x.status)}</div>`).join('') || 'No supervision items yet.'}</div>`;
-  bindInternSwitcher();
-}
-async function supervision() {
-  const switcherHtml = await internSwitcherHtml({ allowAll: true });
-  if (!activeId()) {
-    if (['programme_lead', 'supervisor'].includes(S.session.role)) return supervisionAllView(switcherHtml);
-    if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
-  }
-  const id = activeId(), [data, overview] = await Promise.all([api(`supervision?intern_id=${id}`), api(`intern-overview?intern_id=${id}`)]), isIntern = S.session.role === 'intern', isAdmin = S.session.role === 'programme_lead';
-  // Prompt 8: "improve the empty state with safe examples" — de-identified,
-  // generic scenarios that model good use without referencing any real
-  // patient, so the empty state doubles as a quick example of what belongs
-  // here.
-  const SUPERVISION_EXAMPLES = [
-    'Risk assessment approach for a client presenting with passive suicidal ideation',
-    'How to structure a termination session when a client discontinues abruptly',
-    'Formulation uncertainty on a case with overlapping anxiety and grief presentations'
-  ];
-  const emptyState = `<div class="notice info"><b>No supervision items yet.</b> A good supervision item is a specific question, e.g.:<ul style="margin:8px 0 0;padding-left:18px">${SUPERVISION_EXAMPLES.map(e => `<li>${esc(e)}</li>`).join('')}</ul></div>`;
-  const dueLabel = x => {
-    if (!x.due_date) return '';
-    const overdue = x.due_date < today() && x.status === 'Open';
-    return ` ${overdue ? `<span class="tag red">Due ${esc(x.due_date)} — overdue</span>` : `<span class="tag">Due ${esc(x.due_date)}</span>`}`;
-  };
-  const agenda = [];
-  data.filter(x => x.status === 'Open').forEach(x => agenda.push({severity:x.priority === 'Risk / urgent'?'red':'amber',label:`Supervision question: ${x.topic}`}));
-  overview.referrals.filter(x => referralDaysOverdue(x) > 0).forEach(x => agenda.push({severity:'red',label:`Referral ${x.referral_code}: next action overdue`}));
-  const staleCutoff = new Date(Date.now()-21*86400000);
-  overview.cases.filter(x => ['Intake','Active','Exit review'].includes(x.status) && new Date(x.updated_at) < staleCutoff).forEach(x => agenda.push({severity:'amber',label:`Case ${x.case_code}: review progress`}));
-  overview.milestones.filter(x => x.due_date && !['Complete','Not applicable'].includes(x.status) && x.due_date <= new Date(Date.now()+14*86400000).toISOString().slice(0,10)).forEach(x => agenda.push({severity:x.due_date<today()?'red':'amber',label:`Milestone: ${x.title} · due ${x.due_date}`}));
-  const agendaHtml = `<div class="card" style="margin-bottom:14px"><h3>Suggested supervision agenda</h3><p class="muted">Prepared from open questions, overdue referral actions, inactive cases and placement milestones.</p><div class="list">${agenda.map(x=>`<div class="row"><span class="tag ${x.severity}">${x.severity==='red'?'Priority':'Review'}</span><div class="grow">${esc(x.label)}</div></div>`).join('')||'<div class="queue-empty">No operational concerns detected. Use the session for reflective learning and development.</div>'}</div></div>`;
-  $('#content').innerHTML = switcherHtml + agendaHtml + `<div class="section"><div><h2>${isIntern ? 'Prepare for supervision' : esc(S.intern?.display_name || '') + ' · supervision'}</h2><p>Turn uncertainty into a specific supervision question before the session.</p></div><button id="addSup" class="btn primary">Add supervision item</button></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.topic)}</b> ${x.case_code ? `<span class="tag">${esc(x.case_code)}</span>` : ''}${dueLabel(x)}<br><span>${esc(x.question)}</span>${x.action_taken ? `<br><small class="muted">Already tried: ${esc(x.action_taken)}</small>` : ''}${x.supervisor_note ? `<br><small><b>Response:</b> ${esc(x.supervisor_note)}</small>` : ''}<br><small class="muted">${x.assigned_supervisor_name ? `Assigned to ${esc(x.assigned_supervisor_name)}` : 'Not yet assigned to a specific supervisor'}</small></div>${tag(x.priority)} ${tag(x.status)}${!isIntern && x.status === 'Open' ? `<button class="btn" data-review="${x.id}" aria-label="Review supervision item: ${esc(x.topic)}">Review</button>` : ''}${isAdmin ? `<button class="btn small danger-btn" data-del-sup="${x.id}" data-topic="${esc(x.topic)}" aria-label="Delete supervision item: ${esc(x.topic)}">Delete</button>` : ''}</div>`).join('') || emptyState}</div>`;
-  bindInternSwitcher();
-  $('#addSup').onclick = () => supervisionModal(id);
-  $$('[data-review]').forEach(b => b.onclick = () => { const x = data.find(i => i.id == b.dataset.review); modal('Review supervision item', `<form id="fSupReview"><input type="hidden" name="id" value="${x.id}"><div class="field"><label>Supervisor response<textarea name="supervisor_note">${esc(x.supervisor_note || '')}</textarea></label></div><div class="field"><label>Due date<input name="due_date" type="date" value="${esc(x.due_date || '')}"></label></div><div class="field"><label>Status<select name="status"><option>Open</option><option selected>Reviewed</option><option>Closed</option></select></label></div><button class="btn primary">Save</button></form>`); });
-  $$('[data-del-sup]').forEach(b => b.onclick = () => adminDelete('supervision', b.dataset.delSup, `supervision item “${b.dataset.topic}”`, () => go('supervision'), {
-    message: `This permanently deletes the supervision item “${esc(b.dataset.topic)}” unless undone. It can be restored from the confirmation toast right after deleting.`,
-    reason: { required: false, label: 'Reason (optional)' },
-    restorePath: 'audit-restore'
-  }));
-}
-function supervisionModal(id, preset = {}) { modal('Add to supervision', `<form id="fSup" class="formgrid"><input type="hidden" name="intern_profile_id" value="${id}"><div class="field"><label>Topic<input name="topic" value="${esc(preset.topic || '')}" required></label></div><div class="field"><label>Priority<select name="priority"><option>Routine</option><option>Important</option><option>Risk / urgent</option></select></label></div><div class="field"><label>Due date (optional)<input name="due_date" type="date"></label></div><div class="full field"><label>What exactly are you unsure about?<textarea name="question" required>${esc(preset.question || '')}</textarea></label></div><div class="full field"><label>What have you already considered / tried?<textarea name="action_taken">${esc(preset.action_taken || '')}</textarea></label></div><div class="full"><button class="btn primary">Add to supervision</button></div></form>`); }
-async function saveSup(e) { if (e.target.id !== 'fSup') return; e.preventDefault(); try { await api('supervision', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Added to supervision'); if (S.view === 'supervision') go('supervision'); } catch (x) { toast(x.message); } }
-async function saveSupReview(e) { if (e.target.id !== 'fSupReview') return; e.preventDefault(); try { await api('supervision', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Supervision updated'); go('supervision'); } catch (x) { toast(x.message); } }
-
-// Prompt 8: "define behavioural anchors for ratings 1–5" — one shared
-// rubric across all nine fixed competencies (their own descriptions
-// already say what each competency covers; this says what each rating
-// number means for any of them).
-const COMPETENCY_ANCHORS = [
-  [1, 'Not yet demonstrated', 'Requires direct supervisor guidance or modelling to attempt this.'],
-  [2, 'Emerging', 'Attempts this with significant support and prompting.'],
-  [3, 'Developing', 'Performs this independently in straightforward situations.'],
-  [4, 'Competent', 'Performs this independently and consistently across varied situations.'],
-  [5, 'Advanced', 'Performs this independently, adapts it to complex situations, and can model it for others.']
-];
-function competencyAnchorsHtml() {
-  return `<details class="card" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:800">What each rating means (1–5)</summary><dl class="definitions">${COMPETENCY_ANCHORS.map(([n, label, desc]) => `<dt>${n} — ${esc(label)}</dt><dd>${esc(desc)}</dd>`).join('')}</dl></details>`;
-}
-async function competencies() {
-  const switcherHtml = await internSwitcherHtml();
-  if (!needIntern(switcherHtml)) { bindInternSwitcher(); return; }
-  const id = activeId(), data = await api(`competencies?intern_id=${id}`), isIntern = S.session.role === 'intern';
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h2>${isIntern ? 'My competency development' : 'Competency development'}</h2><p>Ratings are supported by evidence and supervisor feedback.</p></div></div>${competencyAnchorsHtml()}<div class="grid three">${data.map(x => `<div class="card competency"><b>${esc(x.name)}</b><p class="muted">${esc(x.description)}</p><div class="rating"><span>Intern</span><b>${x.intern_rating || '—'} / 5</b><span>Supervisor</span><b>${x.supervisor_rating || '—'} / 5</b></div>${x.evidence ? `<p><small><b>Evidence:</b> ${esc(x.evidence)}</small></p>` : ''}${x.supervisor_comment ? `<p><small><b>Feedback:</b> ${esc(x.supervisor_comment)}</small></p>` : ''}${x.history?.length ? `<details><summary>History (${x.history.length})</summary><div class="list" style="margin-top:6px">${x.history.map(h => `<div class="row"><div class="grow"><small>${h.actor_role === 'intern' ? 'Self' : 'Supervisor'} rating ${h.intern_rating ?? h.supervisor_rating ?? '—'}/5 by ${esc(h.actor_name || 'unknown')}</small></div><small class="muted">${esc(new Date(h.created_at).toLocaleDateString())}</small></div>`).join('')}</div></details>` : ''}<button class="btn" data-comp="${x.id}" aria-label="${isIntern ? 'Update reflection for' : 'Assess'} ${esc(x.name)}">${isIntern ? 'Update reflection' : 'Assess / feedback'}</button></div>`).join('')}</div>`;
-  bindInternSwitcher();
-  $$('[data-comp]').forEach(b => b.onclick = () => competencyModal(data.find(x => x.id == b.dataset.comp), id, isIntern));
-}
-function competencyModal(x, id, isIntern) { modal(x.name, `<form id="fComp"><input type="hidden" name="intern_profile_id" value="${id}"><input type="hidden" name="competency_id" value="${x.id}">${isIntern ? `<div class="field"><label>Self-rating (1–5)<input name="intern_rating" type="number" min="1" max="5" value="${x.intern_rating || ''}"></label></div><div class="field"><label>Evidence / example<textarea name="evidence">${esc(x.evidence || '')}</textarea></label></div>` : `<div class="field"><label>Supervisor rating (1–5)<input name="supervisor_rating" type="number" min="1" max="5" value="${x.supervisor_rating || ''}"></label></div><div class="field"><label>Feedback / development focus<textarea name="supervisor_comment">${esc(x.supervisor_comment || '')}</textarea></label></div>`}<button class="btn primary">Save</button></form>`); }
-async function saveComp(e) { if (e.target.id !== 'fComp') return; e.preventDefault(); try { await api('competencies', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); closeModal(); toast('Competency updated'); go('competencies'); } catch (x) { toast(x.message); } }
-
-// §4 gap fix: combined activity feed across all interns, same rationale as
-// supervisionAllView above.
-async function hoursAllView(switcherHtml) {
-  const data = await api('hours-feed');
-  $('#content').innerHTML = switcherHtml + `<div class="section"><div><h3>All interns · activity log</h3><p>Recently logged non-counselling activity across every intern you can see.</p></div></div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.intern_name)}</b> · ${esc(x.component_name || x.category)}<br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b></div>`).join('') || 'No activity logged yet.'}</div>`;
+…13274 tokens truncated…</div><div class="card list">${data.map(x => `<div class="row"><div class="grow"><b>${esc(x.intern_name)}</b> · ${esc(x.component_name || x.category)}<br><small class="muted">${esc(x.work_date)}${x.note ? ' · ' + esc(x.note) : ''}</small></div><b>${fmt(x.hours)} h</b></div>`).join('') || 'No activity logged yet.'}</div>`;
   bindInternSwitcher();
 }
 const PRACTICUM_ACTIVITY_TYPES = [
@@ -1393,7 +1063,13 @@ function authMessage(message, kind='danger'){
 }
 function authError(message){authMessage(message,'danger');}
 function showPasswordSetup(type){pendingAuthType=type;$('#login').classList.add('hidden');$('#setPassword').classList.remove('hidden');$('#setPasswordMessage').innerHTML=type==='recovery'?'<b>Choose a new password</b><br>Enter and confirm your new password.':'<b>Finish setting up your account</b><br>Create a password to accept your invitation.';}
-async function finishLogin(){const b=await api('bootstrap');S.session={profile:b.profile,role:b.role};restoreActiveIntern();shell();startIdleProtection();}
+async function finishLogin(){
+  const b=await api('bootstrap');
+  S.session={profile:b.profile,role:b.role};
+  S.systemHealth=b.system_health||null;
+  restoreActiveIntern();shell();startIdleProtection();
+  if(S.systemHealth?.status==='migration_required') toast(`Database update required (expected schema ${S.systemHealth.required_version}).`);
+}
 
 // Auth: Supabase Auth (supabase-js) replaces @netlify/identity. Invite and
 // password-recovery links both land back on this page with tokens in the

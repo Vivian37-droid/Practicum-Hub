@@ -1,0 +1,39 @@
+name: Practicum Hub checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  production-smoke:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the public application and authentication boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          page="$(curl --fail --silent --show-error https://practicum-hub.pages.dev/)"
+          grep -q 'Stellenbosch RC Practicum Hub' <<<"$page"
+          grep -q 'cf-turnstile' <<<"$page"
+          status="$(curl --silent --output /tmp/bootstrap.json --write-out '%{http_code}' https://practicum-hub.pages.dev/api/bootstrap)"
+          test "$status" = "401"
+          grep -q 'Please sign in' /tmp/bootstrap.json

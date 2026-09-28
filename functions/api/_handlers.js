@@ -23,7 +23,8 @@ import { requireRole, assertInternAccess, audit, loadProfile } from '../_shared/
 import {
   HttpError, num, round, dateValue, limited, requireMethod, cleanEmail, unwrap,
   monthEnd, CASE_STATUSES, SUPERVISION_STATUSES, SUPERVISION_PRIORITIES,
-  SESSION_TYPES, GENDERS, REFERRAL_STATUSES, REFERRAL_PRIORITIES
+  SESSION_TYPES, GENDERS, REFERRAL_STATUSES, REFERRAL_PRIORITIES,
+  dateInTimeZone, monthInTimeZone, addIsoDays
 } from '../_shared/util.js';
 
 // Flattens a PostgREST-embedded `profiles(display_name)` (or
@@ -63,6 +64,26 @@ const ACTIVITY_SERVICE_TYPES = new Set([
   'Ethical / professional activity',
   'Other professional activity'
 ]);
+const REQUIRED_SCHEMA_VERSION = 19;
+
+export async function systemHealth(ctx, env) {
+  requireRole(ctx, ['programme_lead']);
+  const admin = getAdmin(env);
+  const { data, error } = await admin.from('app_schema_version')
+    .select('version, applied_at')
+    .order('version', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data) {
+    return { status: 'migration_required', required_version: REQUIRED_SCHEMA_VERSION, detected_version: null };
+  }
+  return {
+    status: Number(data.version) >= REQUIRED_SCHEMA_VERSION ? 'ok' : 'migration_required',
+    required_version: REQUIRED_SCHEMA_VERSION,
+    detected_version: Number(data.version),
+    applied_at: data.applied_at
+  };
+}
 function activityServiceType(value) {
   const result = value || 'Other professional activity';
   if (!ACTIVITY_SERVICE_TYPES.has(result)) throw new HttpError(400, 'Choose a valid activity type');
@@ -269,10 +290,10 @@ export async function weeklyPlan(ctx, env, url, body, method) {
   if (!id) throw new HttpError(400, 'Intern id is required');
   await assertInternAccess(ctx, id, env);
   if (method === 'GET') {
-    const start = url.searchParams.get('start') || new Date().toISOString().slice(0,10);
-    const endDate = new Date(start + 'T00:00:00Z'); endDate.setUTCDate(endDate.getUTCDate()+7);
+    const start = url.searchParams.get('start') || dateInTimeZone();
+    const end = addIsoDays(start, 7);
     const [appointments,casesRes,facilitiesRes]=await Promise.all([
-      admin.from('weekly_appointments').select('*').eq('intern_profile_id',id).gte('appointment_date',start).lt('appointment_date',endDate.toISOString().slice(0,10)).order('appointment_date').order('appointment_time'),
+      admin.from('weekly_appointments').select('*').eq('intern_profile_id',id).gte('appointment_date',start).lt('appointment_date',end).order('appointment_date').order('appointment_time'),
       admin.from('cases').select('id,case_code,site,status').eq('intern_profile_id',id).neq('status','Exited').order('case_code'),
       admin.from('facilities').select('id,name,service_context').eq('active',true).order('name')
     ]);
@@ -299,7 +320,7 @@ export async function myService(ctx, env, url, body, method){
   requireRole(ctx,['programme_lead']);
   const admin=getAdmin(env),owner=ctx.user.id;
   if(method==='GET'){
-    const month=String(url.searchParams.get('month')||new Date().toISOString().slice(0,7));
+    const month=String(url.searchParams.get('month')||monthInTimeZone());
     if(!/^\d{4}-\d{2}$/.test(month))throw new HttpError(400,'Invalid month');
     const start=month+'-01',endDate=new Date(start+'T00:00:00Z');endDate.setUTCMonth(endDate.getUTCMonth()+1);
     const [entries,facilities,schedule]=await Promise.all([
@@ -346,7 +367,9 @@ function emptyInternSnapshot() {
     awaiting_acceptance: 0, contact_attempts: 0, patients_contacted: 0,
     no_response: 0, booked: 0, attended_week: 0, booked_week: 0,
     dna_week: 0, intakes_week: 0, followups_week: 0, activities_week: 0,
-    hours_week: 0, upcoming_week: [], outstanding: 0
+    hours_week: 0, upcoming_week: [], outstanding: 0,
+    _encounter_booked: 0, _encounter_attended: 0, _encounter_dna: 0,
+    _activity_sessions: 0, _appointment_booked: 0, _appointment_attended: 0, _appointment_dna: 0
   };
 }
 
@@ -356,13 +379,10 @@ async function buildInternSnapshots(admin, interns) {
   const internIds = interns.map(p => p.id);
   if (!internIds.length) return {};
   const sessionHoursByIntern = Object.fromEntries(interns.map(p => [p.id, Math.max(0.25, Number(p.default_session_minutes || 60) / 60)]));
-  const now = new Date();
-  const day = now.getUTCDay() || 7;
-  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - day + 1));
-  const nextMonday = new Date(monday); nextMonday.setUTCDate(nextMonday.getUTCDate() + 7);
-  const today = now.toISOString().slice(0, 10);
-  const weekStart = monday.toISOString().slice(0, 10);
-  const weekEnd = nextMonday.toISOString().slice(0, 10);
+  const today = dateInTimeZone();
+  const day = new Date(`${today}T00:00:00Z`).getUTCDay() || 7;
+  const weekStart = addIsoDays(today, 1 - day);
+  const weekEnd = addIsoDays(weekStart, 7);
   const [refsRes, encountersRes, hoursRes, plannedRes, scheduleRes, supervisionRes, appointmentsRes] = await Promise.all([
     admin.from('referrals').select('intern_profile_id,status,contact_attempts,accepted_at,next_action_date').in('intern_profile_id', internIds),
     admin.from('encounters').select('intern_profile_id,encounter_date,booked,attended,session_type').in('intern_profile_id', internIds).gte('encounter_date', weekStart).lt('encounter_date', weekEnd),
@@ -391,11 +411,11 @@ async function buildInternSnapshots(admin, interns) {
   }
   for (const e of encountersRes.data || []) {
     const s = out[e.intern_profile_id]; if (!s) continue;
-    if (e.booked) s.booked_week++;
+    if (e.booked) s._encounter_booked++;
     if (e.attended) {
-      s.attended_week++;
+      s._encounter_attended++;
       if (e.session_type === 'First') s.intakes_week++; else s.followups_week++;
-    } else if (e.booked) s.dna_week++;
+    } else if (e.booked) s._encounter_dna++;
   }
   for (const h of hoursRes.data || []) {
     const s = out[h.intern_profile_id]; if (!s) continue;
@@ -404,7 +424,7 @@ async function buildInternSnapshots(admin, interns) {
     // session equivalents using that intern's configured session duration.
     // component_code is included for older rows whose service_type is blank.
     const individual = h.service_type === 'Individual counselling' || /individual|counselling/i.test(String(h.component_code || ''));
-    if (individual) s.attended_week += Math.max(1, Math.round(Number(h.hours || 0) / sessionHoursByIntern[h.intern_profile_id]));
+    if (individual) s._activity_sessions += Math.max(1, Math.round(Number(h.hours || 0) / sessionHoursByIntern[h.intern_profile_id]));
     else s.activities_week++;
     s.hours_week += Number(h.hours || 0);
   }
@@ -421,12 +441,23 @@ async function buildInternSnapshots(admin, interns) {
   }
   for (const a of appointmentsRes.error ? [] : (appointmentsRes.data || [])) {
     const s=out[a.intern_profile_id]; if(!s) continue;
-    s.booked_week++;
-    if(a.status==='Attended') s.attended_week++;
-    if(a.status==='Did not attend') s.dna_week++;
+    if(!['Cancelled'].includes(a.status)) s._appointment_booked++;
+    if(a.status==='Attended') s._appointment_attended++;
+    if(a.status==='Did not attend') s._appointment_dna++;
     if(a.status==='Booked') s.upcoming_week.push({title:'Patient appointment',date:a.appointment_date,time:a.appointment_time,site:a.site,kind:'Booked'});
   }
-  Object.values(out).forEach(s => { s.hours_week = round(s.hours_week, 1); s.upcoming_week = s.upcoming_week.slice(0, 4); });
+  // The same counselling contact can appear in Case Workflow, the Activity
+  // Log and Weekly Plan. Until every historical row has a shared session id,
+  // use the largest source total instead of summing the three sources. This
+  // preserves Activity-Log-only work while preventing double/triple counts.
+  Object.values(out).forEach(s => {
+    s.booked_week = Math.max(s._encounter_booked, s._appointment_booked);
+    s.attended_week = Math.max(s._encounter_attended, s._activity_sessions, s._appointment_attended);
+    s.dna_week = Math.max(s._encounter_dna, s._appointment_dna);
+    s.hours_week = round(s.hours_week, 1);
+    s.upcoming_week = s.upcoming_week.slice(0, 4);
+    Object.keys(s).filter(k => k.startsWith('_')).forEach(k => delete s[k]);
+  });
   return out;
 }
 
@@ -557,13 +588,13 @@ async function buildQueue(env, ctx, interns, supervisorId) {
     .select('id, title, due_date, intern_profile_id, profiles(display_name, supervisor_identity_user_id)')
     .not('status', 'in', '(Complete,Not applicable)')
     .not('due_date', 'is', null)
-    .lte('due_date', new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10))
+    .lte('due_date', addIsoDays(dateInTimeZone(), 14))
     .order('due_date', { ascending: true }).limit(20);
   if (supervisorId) milestoneQuery = milestoneQuery.eq('profiles.supervisor_identity_user_id', supervisorId);
   const { data: dueMilestones, error: milestoneErr } = await milestoneQuery;
   if (milestoneErr && !missingOptionalTable(milestoneErr, 'placement_milestones')) throw new HttpError(500, milestoneErr.message);
   for (const m of (milestoneErr ? [] : (dueMilestones || []))) {
-    const overdue = m.due_date < new Date().toISOString().slice(0, 10);
+    const overdue = m.due_date < dateInTimeZone();
     items.push({
       kind: 'milestone_due', severity: overdue ? 'red' : 'amber',
       title: `${m.title} ${overdue ? 'overdue' : 'due soon'}`,
@@ -575,7 +606,7 @@ async function buildQueue(env, ctx, interns, supervisorId) {
   let refQuery = admin.from('referrals')
     .select('id, referral_code, status, next_action_date, intern_profile_id, profiles(display_name, supervisor_identity_user_id)')
     .not('next_action_date', 'is', null)
-    .lt('next_action_date', new Date().toISOString().slice(0, 10))
+    .lt('next_action_date', dateInTimeZone())
     .order('next_action_date', { ascending: true })
     .limit(20);
   if (supervisorId) refQuery = refQuery.eq('profiles.supervisor_identity_user_id', supervisorId);
@@ -982,7 +1013,7 @@ export async function dailySummary(ctx, env, url) {
   const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : 0));
   await assertInternAccess(ctx, id, env);
-  const day = dateValue(url.searchParams.get('date') || new Date().toISOString().slice(0, 10), 'Date');
+  const day = dateValue(url.searchParams.get('date') || dateInTimeZone(), 'Date');
   const [encounterRes, hoursRes, casesRes] = await Promise.all([
     admin.from('encounters').select('*, cases(case_code)').eq('intern_profile_id', id).eq('encounter_date', day)
       .order('created_at', { ascending: true }),
@@ -1324,7 +1355,7 @@ export async function reports(ctx, env, url, body, method) {
   const admin = getAdmin(env);
   const id = Number(url.searchParams.get('intern_id') || (ctx.role === 'intern' ? ctx.profile.id : body.intern_profile_id || 0));
   await assertInternAccess(ctx, id, env);
-  const month = (url.searchParams.get('month') || body.month || `${new Date().toISOString().slice(0, 7)}-01`).slice(0, 7) + '-01';
+  const month = (url.searchParams.get('month') || body.month || `${monthInTimeZone()}-01`).slice(0, 7) + '-01';
   const end = monthEnd(month);
   if (method === 'GET') {
     const [reportRes, statsRes, activity, corrections, trendRes, breakdownRes] = await Promise.all([

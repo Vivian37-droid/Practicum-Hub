@@ -17,7 +17,13 @@ export async function onRequest({ request, env }) {
     if (!['GET', 'HEAD'].includes(request.method)) { try { body = await request.json(); } catch {} }
     const method = request.method;
 
-    if (path === 'bootstrap') return json({ profile: ctx.profile, role: ctx.role, dashboard: await h.dashboard(ctx, env) });
+    if (path === 'bootstrap') return json({
+      profile: ctx.profile,
+      role: ctx.role,
+      dashboard: await h.dashboard(ctx, env),
+      system_health: ctx.role === 'programme_lead' ? await h.systemHealth(ctx, env) : null
+    });
+    if (path === 'system-health') return json(await h.systemHealth(ctx, env));
     if (path === 'dashboard') return json(await h.dashboard(ctx, env));
     if (path === 'intern-overview') return json(await h.internOverview(ctx, env, url));
     if (path === 'interns') return json(await h.interns(ctx, env, url, body, method), method === 'POST' ? 201 : 200);

@@ -18,6 +18,19 @@ export const leadEmails = (env) =>
   new Set((env.PROGRAMME_LEAD_EMAILS || '').split(',').map(cleanEmail).filter(Boolean));
 export const weeksBetween = (a, b) => Math.max(0, (new Date(b) - new Date(a)) / (7 * 86400000));
 export const monthEnd = start => { const d = new Date(`${start}T00:00:00Z`); d.setUTCMonth(d.getUTCMonth() + 1); return d.toISOString().slice(0, 10); };
+export const APP_TIME_ZONE = 'Africa/Johannesburg';
+export function dateInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(date).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+export const monthInTimeZone = (date = new Date(), timeZone = APP_TIME_ZONE) => dateInTimeZone(date, timeZone).slice(0, 7);
+export function addIsoDays(isoDate, days) {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 export const CASE_STATUSES = new Set(['Allocated', 'Contact attempted', 'Booked', 'Intake', 'Active', 'Exit review', 'Exited']);
 export const SUPERVISION_STATUSES = new Set(['Open', 'Reviewed', 'Closed']);

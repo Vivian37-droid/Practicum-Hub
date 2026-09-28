@@ -55,7 +55,7 @@ own email, then add that email to the `PROGRAMME_LEAD_EMAILS` secret below —
    - `SUPABASE_DB_URL` — the pooler connection string from step 1.6
    - `SUPABASE_URL` — the project URL from step 1.5
    - `SUPABASE_SERVICE_ROLE_KEY` — from step 1.5
-   - `PROGRAMME_LEAD_EMAILS` — comma-separated, e.g. `vivian.leibrandt@westerncape.gov.za`
+   - `PROGRAMME_LEAD_EMAILS` — comma-separated programme-lead work email addresses
    - `PUBLIC_SITE_URL` — your Pages URL, e.g. `https://practicum-hub.pages.dev`
 3. Set compatibility flags: `nodejs_compat` (needed by `postgres` and
    `@supabase/supabase-js`), compatibility date `2026-09-01` or later — both
