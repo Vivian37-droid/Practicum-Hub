@@ -16,6 +16,10 @@ describe('Turnstile authentication protection',()=>{
     expect(captcha).toContain('captchaToken});');
     expect(captcha).toContain('Complete the security check before continuing.');
   });
+  it('retains the public Supabase configuration if the runtime globals load late',()=>{
+    expect(captcha).toContain("window.__SUPABASE_URL__||'https://zegszyahpkwmgujbdwoo.supabase.co'");
+    expect(captcha).toContain('createClient(SUPABASE_URL,SUPABASE_ANON_KEY)');
+  });
   it('allows Turnstile through the content security policy',()=>{
     expect(headers).toContain("script-src 'self' https://cdn.jsdelivr.net https://challenges.cloudflare.com");
     expect(headers).toContain('frame-src https://challenges.cloudflare.com');
