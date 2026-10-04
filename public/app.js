@@ -1405,7 +1405,10 @@ async function finishLogin(){
   S.session={profile:b.profile,role:b.role};
   S.systemHealth=b.system_health||null;
   restoreActiveIntern();shell();startIdleProtection();
-  if(S.systemHealth?.status==='migration_required') toast(`Database update required (expected schema ${S.systemHealth.required_version}).`);
+  if(S.systemHealth?.status==='migration_required'){
+    const missing=S.systemHealth.missing?.length?` Missing: ${S.systemHealth.missing.join(', ')}.`:'';
+    toast(`Database update required (expected schema ${S.systemHealth.required_version}).${missing}`);
+  }
 }
 
 // Auth: Supabase Auth (supabase-js) replaces @netlify/identity. Invite and

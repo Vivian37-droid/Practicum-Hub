@@ -64,24 +64,35 @@ const ACTIVITY_SERVICE_TYPES = new Set([
   'Ethical / professional activity',
   'Other professional activity'
 ]);
-const REQUIRED_SCHEMA_VERSION = 19;
+const REQUIRED_SCHEMA_VERSION = 20;
 
 export async function systemHealth(ctx, env) {
   requireRole(ctx, ['programme_lead']);
   const admin = getAdmin(env);
-  const { data, error } = await admin.from('app_schema_version')
-    .select('version, applied_at')
-    .order('version', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error || !data) {
-    return { status: 'migration_required', required_version: REQUIRED_SCHEMA_VERSION, detected_version: null };
+  const [{ data, error }, { data: integrity, error: integrityError }] = await Promise.all([
+    admin.from('app_schema_version')
+      .select('version, applied_at')
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    admin.rpc('app_schema_health')
+  ]);
+  const missing = Array.isArray(integrity?.missing) ? integrity.missing : [];
+  if (error || !data || integrityError || integrity?.ok !== true) {
+    return {
+      status: 'migration_required',
+      required_version: REQUIRED_SCHEMA_VERSION,
+      detected_version: data ? Number(data.version) : null,
+      missing,
+      integrity_error: integrityError?.message || null
+    };
   }
   return {
     status: Number(data.version) >= REQUIRED_SCHEMA_VERSION ? 'ok' : 'migration_required',
     required_version: REQUIRED_SCHEMA_VERSION,
     detected_version: Number(data.version),
-    applied_at: data.applied_at
+    applied_at: data.applied_at,
+    missing
   };
 }
 function activityServiceType(value) {

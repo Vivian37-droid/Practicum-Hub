@@ -22,7 +22,9 @@ unchanged; what changed is what it talks to:
 2. In the SQL editor, run every file in `supabase/migrations/` in numerical
    order. Existing installations should run only the migrations that have
    not yet been applied. Migration `0012_integrated_placement_workflow.sql`
-   links referrals to cases and creates placement milestones. If you use the
+   links referrals to cases and creates placement milestones. Migration
+   `0020_schema_integrity_health.sql` verifies the actual required tables,
+   columns and functions so skipped intermediate migrations are reported. If you use the
    Supabase CLI instead: `supabase link` then `supabase db push`.
 3. Under **Authentication → Providers**, keep only Email enabled.
 4. Under **Authentication → URL Configuration**, set the Site URL to your
