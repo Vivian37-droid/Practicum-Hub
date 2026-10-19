@@ -924,13 +924,16 @@ export async function cases(ctx, env, url, body, method) {
     return withInternName(rows);
   }
   if (method === 'POST') {
-    requireRole(ctx, ['programme_lead', 'supervisor']);
+    // Interns may add their own clients who did not come through a referral
+    // (assertInternAccess limits them to themselves). Planned frequency stays
+    // a supervisor decision, as on PATCH.
+    requireRole(ctx, ['programme_lead', 'supervisor', 'intern']);
     await assertInternAccess(ctx, id, env);
     const caseCode = codeValue(body.case_code, 'Case code');
     const site = limited(body.site, 120, 'Site', true);
     const category = limited(body.presenting_category, 120, 'Presenting category');
     const status = body.status || 'Allocated';
-    const frequency = Number(body.planned_frequency_weeks || 1);
+    const frequency = ctx.role === 'intern' ? 1 : Number(body.planned_frequency_weeks || 1);
     if (!CASE_STATUSES.has(status)) throw new HttpError(400, 'Invalid case status');
     if (!Number.isInteger(frequency) || frequency < 1 || frequency > 52) throw new HttpError(400, 'Invalid planned frequency');
     const row = unwrap(await admin.from('cases').insert({
@@ -967,6 +970,44 @@ export async function cases(ctx, env, url, body, method) {
   throw new HttpError(405, 'Method not allowed');
 }
 
+// Referral statuses that already have a linked case (see sync_referral_case
+// in 0012_integrated_placement_workflow.sql).
+const CASE_REFERRAL_STATUSES = new Set(['Booked', 'Intake completed', 'Active', 'Awaiting feedback']);
+
+async function caseForEncounter(admin, caseId) {
+  const { data, error } = await admin.from('cases').select('*').eq('id', caseId).maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  return data;
+}
+
+// Recording a session straight from a referral. A referral only gets a case
+// once it reaches Booked / Intake completed / Active, so a session on an
+// earlier-stage referral first moves the referral forward — the trigger then
+// creates its case — and the session is recorded against that case.
+async function caseFromReferral(ctx, env, admin, referralId, { attended, sessionType }) {
+  if (!referralId) throw new HttpError(400, 'Choose a case or referral');
+  const { data: ref, error } = await admin.from('referrals').select('*').eq('id', referralId).maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  if (!ref) throw new HttpError(404, 'Referral not found');
+  await assertInternAccess(ctx, ref.intern_profile_id, env);
+  if (String(ref.status).startsWith('Closed') || ref.status === 'Reallocated') {
+    throw new HttpError(400, 'This referral is closed. Change its status before recording a session.');
+  }
+  if (!CASE_REFERRAL_STATUSES.has(ref.status)) {
+    const status = !attended ? 'Booked' : sessionType === 'Intake' ? 'Intake completed' : 'Active';
+    unwrap(await admin.from('referrals').update({
+      status,
+      updated_by_identity_user_id: ctx.user.id,
+      updated_at: new Date().toISOString()
+    }).eq('id', ref.id).select().single());
+    await audit(ctx, env, 'update', 'referral', ref.id, { status, via: 'session' }, ref.intern_profile_id);
+  }
+  const { data: linked, error: linkErr } = await admin.from('cases').select('*').eq('referral_id', ref.id).maybeSingle();
+  if (linkErr) throw new HttpError(500, linkErr.message);
+  if (!linked) throw new HttpError(500, 'The case for this referral could not be created. Ask the programme lead to check the database is up to date.');
+  return linked;
+}
+
 export async function encounters(ctx, env, url, body, method) {
   const admin = getAdmin(env);
   if (method === 'DELETE') {
@@ -990,21 +1031,25 @@ export async function encounters(ctx, env, url, body, method) {
     return rows.map(r => { const { cases: c, ...rest } = r; return { ...rest, case_code: c?.case_code ?? null }; });
   }
   requireMethod(method, ['POST']);
-  const { data: theCase, error: caseErr } = await admin.from('cases').select('*').eq('id', Number(body.case_id)).maybeSingle();
-  if (caseErr) throw new HttpError(500, caseErr.message);
-  if (!theCase || theCase.intern_profile_id !== id) throw new HttpError(400, 'Case does not belong to this intern');
+  // Validate everything first so a bad entry never half-saves (e.g. promotes
+  // a referral to a case and then fails on the session itself).
   const booked = String(body.booked) !== 'false';
   const attended = String(body.attended) !== 'false';
-  const profile = await loadProfile(env, id);
-  const duration = attended ? Math.max(1, num(body.duration_minutes || profile.default_session_minutes || 60)) : 0;
-  if (duration > 480) throw new HttpError(400, 'Duration cannot exceed 480 minutes');
+  const encounterDate = dateValue(body.encounter_date, 'Encounter date');
   if (!SESSION_TYPES.has(body.session_type)) throw new HttpError(400, 'Invalid session type');
   const gender = body.patient_gender || 'Unknown';
   if (!GENDERS.has(gender)) throw new HttpError(400, 'Invalid gender value');
+  const profile = await loadProfile(env, id);
+  const duration = attended ? Math.max(1, num(body.duration_minutes || profile.default_session_minutes || 60)) : 0;
+  if (duration > 480) throw new HttpError(400, 'Duration cannot exceed 480 minutes');
+  const theCase = body.case_id
+    ? await caseForEncounter(admin, Number(body.case_id))
+    : await caseFromReferral(ctx, env, admin, Number(body.referral_id || 0), { attended, sessionType: body.session_type });
+  if (!theCase || theCase.intern_profile_id !== id) throw new HttpError(400, 'Case does not belong to this intern');
   const row = unwrap(await admin.rpc('create_encounter', {
     p_case_id: theCase.id,
     p_intern_id: id,
-    p_encounter_date: dateValue(body.encounter_date, 'Encounter date'),
+    p_encounter_date: encounterDate,
     p_booked: booked,
     p_attended: attended,
     p_session_type: body.session_type,
