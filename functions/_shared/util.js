@@ -53,6 +53,19 @@ export const limited = (value, max, label, required = false) => {
   return text || null;
 };
 
+// Referral and case codes must be de-identified (e.g. EG-024): letters,
+// numbers and hyphens only, with at least one number. Patient names never
+// contain a number, so this rejects "Jane Smith" while accepting every code
+// format the programme uses. Keep in step with CODE_RULE in public/app.js.
+export const CODE_RULE = /^(?=.*\d)[A-Z0-9][A-Z0-9-]{1,49}$/;
+export const isDeidentifiedCode = value => CODE_RULE.test(String(value || '').trim().toUpperCase());
+export const codeValue = (value, label) => {
+  const text = String(value || '').trim().toUpperCase();
+  if (!text) throw new HttpError(400, `${label} is required`);
+  if (!CODE_RULE.test(text)) throw new HttpError(400, `${label} must be a de-identified code such as EG-024 (letters, numbers and hyphens, with at least one number). Never use a patient's name.`);
+  return text;
+};
+
 export function requireMethod(method, allowed) {
   if (!allowed.includes(method)) throw new HttpError(405, 'Method not allowed');
 }

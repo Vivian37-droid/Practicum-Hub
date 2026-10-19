@@ -21,7 +21,7 @@
 import { getAdmin } from '../_shared/clients.js';
 import { requireRole, assertInternAccess, audit, loadProfile } from '../_shared/context.js';
 import {
-  HttpError, num, round, dateValue, limited, requireMethod, cleanEmail, unwrap,
+  HttpError, num, round, dateValue, limited, codeValue, requireMethod, cleanEmail, unwrap,
   monthEnd, CASE_STATUSES, SUPERVISION_STATUSES, SUPERVISION_PRIORITIES,
   SESSION_TYPES, GENDERS, REFERRAL_STATUSES, REFERRAL_PRIORITIES,
   dateInTimeZone, monthInTimeZone, addIsoDays
@@ -926,7 +926,7 @@ export async function cases(ctx, env, url, body, method) {
   if (method === 'POST') {
     requireRole(ctx, ['programme_lead', 'supervisor']);
     await assertInternAccess(ctx, id, env);
-    const caseCode = limited(body.case_code, 50, 'Case code', true)?.toUpperCase();
+    const caseCode = codeValue(body.case_code, 'Case code');
     const site = limited(body.site, 120, 'Site', true);
     const category = limited(body.presenting_category, 120, 'Presenting category');
     const status = body.status || 'Allocated';
@@ -1486,7 +1486,7 @@ export async function referrals(ctx, env, url, body, method) {
     const selfAllocated = ctx.role === 'intern' && id === ctx.profile.id;
     const row = unwrap(await admin.from('referrals').insert({
       intern_profile_id: id,
-      referral_code: limited(body.referral_code, 50, 'Referral code', true)?.toUpperCase(),
+      referral_code: codeValue(body.referral_code, 'Referral code'),
       referral_date: dateValue(body.referral_date, 'Referral date'),
       referral_source: limited(body.referral_source, 100, 'Referral source'),
       site: limited(body.site, 120, 'Site'),
@@ -1514,9 +1514,24 @@ export async function referrals(ctx, env, url, body, method) {
   if (!REFERRAL_STATUSES.has(status) || !REFERRAL_PRIORITIES.has(priority)) throw new HttpError(400, 'Invalid referral status or priority');
   const attempts = body.contact_attempts == null ? current.contact_attempts : Number(body.contact_attempts);
   if (!Number.isInteger(attempts) || attempts < 0 || attempts > 100) throw new HttpError(400, 'Invalid contact attempts');
-  const nextActionDate = body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null;
-  const lastUpdate = limited(body.last_update, 1000, 'Operational update');
+  // A field missing from the request keeps its saved value; only a field the
+  // form actually sent (even as '') changes it. Previously any omitted field
+  // was wiped to null.
+  const nextActionDate = body.next_action_date === undefined ? current.next_action_date
+    : body.next_action_date ? dateValue(body.next_action_date, 'Next action date') : null;
+  const lastUpdate = body.last_update === undefined ? current.last_update : limited(body.last_update, 1000, 'Operational update');
   const updateCategory = body.update_category == null ? current.update_category : limited(body.update_category, 60, 'Operational update category');
+  // Code correction (e.g. replacing a patient name entered by mistake). The
+  // sync_referral_case trigger copies the new code onto the linked case. The
+  // audit entry records only that a correction happened, never the old value,
+  // so a mistakenly entered name is not preserved in the audit log.
+  // An unchanged legacy code is let through so status updates are never
+  // blocked; the referral list flags it until it is corrected.
+  const submittedCode = body.referral_code === undefined ? null : String(body.referral_code).trim().toUpperCase();
+  const referralCode = !submittedCode || submittedCode === String(current.referral_code).toUpperCase()
+    ? current.referral_code
+    : codeValue(submittedCode, 'Referral code');
+  const codeCorrected = referralCode !== current.referral_code;
   // Keep referral edits on the same direct PostgREST path used by creation
   // and acceptance. The previous RPC depended on the deployed database
   // having the latest overloaded update_referral signature; when that
@@ -1524,6 +1539,7 @@ export async function referrals(ctx, env, url, body, method) {
   // the row. A direct update removes that migration-order dependency.
   const closedAt = status.startsWith('Closed') ? (current.closed_at || new Date().toISOString()) : null;
   const row = unwrap(await admin.from('referrals').update({
+    referral_code: referralCode,
     priority,
     status,
     contact_attempts: attempts,
@@ -1534,7 +1550,7 @@ export async function referrals(ctx, env, url, body, method) {
     updated_at: new Date().toISOString(),
     closed_at: closedAt
   }).eq('id', current.id).select().single());
-  await audit(ctx, env, 'update', 'referral', row.id, { status }, current.intern_profile_id);
+  await audit(ctx, env, 'update', 'referral', row.id, codeCorrected ? { status, code_corrected: true } : { status }, current.intern_profile_id);
   return row;
 }
 
