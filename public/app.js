@@ -109,27 +109,37 @@ function startIdleProtection(){
   resetIdleTimers();
 }
 
-// Per-role nav labels (unchanged wording from before Prompt 6) — now grouped
-// under NAV_GROUPS instead of rendered as one flat list, per Prompt 6's
-// "reorganise navigation into clearer groups" requirement. A view only
-// appears in the sidebar for a role if it has a label here, so role
-// permissions are exactly as strict as before this refactor.
+// Per-role labels. A view is only reachable for a role if it has a label
+// here, so these remain the permission list; NAV_MENUS below decides which
+// of them appear in the sidebar and in what order.
 const NAV_LABELS = {
   programme_lead: { dashboard: 'Action Centre', myservice:'My Service', weekly: 'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', programme: 'Programme evidence', handbook: 'Handbook' },
   supervisor: { dashboard: 'Action Centre', weekly: 'Weekly plan', interns: 'Assigned interns', overview: 'Intern overview', daily: 'Daily check-in', referrals: 'Referrals', progress: 'Requirements & pace', cases: 'Cases', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Reports', assistant: 'Practicum Assistant', handbook: 'Handbook' },
-  intern: { dashboard: 'My placement', weekly: 'My weekly plan', daily: 'How was today?', referrals: 'My referrals', progress: 'My requirements', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
+  intern: { dashboard: 'My placement', weekly: 'My week', daily: 'Today', referrals: 'My referrals', progress: 'My hours & targets', cases: 'My cases', supervision: 'Supervision prep', competencies: 'My competencies', hours: 'Activity log', reports: 'My report', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', handbook: 'Handbook' },
   management: { dashboard: 'Programme overview', programme: 'Programme evidence', handbook: 'Handbook' }
 };
-// Group order and membership per Prompt 6. A group is only rendered for a
-// role if at least one of its views has a label for that role.
-const NAV_GROUPS = [
-  ['Home', ['dashboard','myservice']],
-  ['Weekly work', ['weekly','daily']],
-  ['Clinical work', ['referrals','cases']],
-  ['Supervision', ['supervision']],
-  ['Progress', ['hours','progress','competencies','interns','overview']],
-  ['Reports & support', ['reports','programme','assistant','feedback','handbook']]
+// Sidebar menus, per role, ordered by how often each screen is used. Every
+// group is always open (the old collapsed groups hid most screens behind an
+// extra tap). Views a role can reach but that are not listed are opened from
+// buttons instead: interns reach the Practicum Assistant from "Quick help"
+// and Pilot feedback from their home page.
+const STAFF_MENU = [
+  ['Overview', ['dashboard', 'interns', 'overview']],
+  ['Clinical work', ['referrals', 'cases', 'daily', 'weekly']],
+  ['Progress & supervision', ['progress', 'hours', 'supervision', 'competencies']],
+  ['Reports', ['reports', 'programme', 'myservice']],
+  ['Help', ['assistant', 'handbook']]
 ];
+const NAV_MENUS = {
+  intern: [
+    ['Every day', ['dashboard', 'daily', 'referrals', 'cases', 'weekly']],
+    ['Progress', ['progress', 'hours', 'reports', 'competencies']],
+    ['Support', ['supervision', 'handbook']]
+  ],
+  programme_lead: STAFF_MENU,
+  supervisor: STAFF_MENU,
+  management: [['', ['dashboard', 'programme', 'handbook']]]
+};
 function navFlat(role) { return Object.keys(NAV_LABELS[role] || {}); }
 const titles = { dashboard: 'Action Centre', myservice:'My Service', weekly:'Weekly plan', interns: 'Interns', overview: 'Intern overview', daily: 'How was today?', referrals: 'Referral tracker', progress: 'Requirements & pace', cases: 'Case workflow', supervision: 'Supervision', competencies: 'Competencies', hours: 'Activity log', reports: 'Monthly reports', assistant: 'Practicum Assistant', feedback: 'Pilot feedback', programme: 'Programme evidence', handbook: 'Practicum handbook' };
 
@@ -360,11 +370,10 @@ function shell() {
   $('#me').innerHTML = `<b>${esc(profile.display_name)}</b><br>${roleName(role)}`;
   $('#role').textContent = roleName(role);
   const labels = NAV_LABELS[role] || {};
-  $('#nav').innerHTML = NAV_GROUPS.map(([groupLabel, views]) => {
+  $('#nav').innerHTML = (NAV_MENUS[role] || []).map(([groupLabel, views]) => {
     const items = views.filter(v => labels[v]);
     if (!items.length) return '';
-    const always=groupLabel==='Home';
-    return `<details class="navgroup" ${always?'open':''}><summary>${esc(groupLabel)}</summary><div>${items.map(v => `<button class="navbtn" data-view="${v}">${esc(labels[v])}</button>`).join('')}</div></details>`;
+    return `<div class="navgroup">${groupLabel ? `<h4 class="navhead">${esc(groupLabel)}</h4>` : ''}${items.map(v => `<button class="navbtn" data-view="${v}">${esc(labels[v])}</button>`).join('')}</div>`;
   }).join('');
   $$('.navbtn').forEach(b => b.onclick = () => go(b.dataset.view));
   const requested = new URLSearchParams(location.search).get('view');
@@ -391,7 +400,7 @@ async function go(view, opts = {}) {
     b.classList.toggle('active', isActive);
     if (isActive) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
-  $('#title').textContent = titles[view]; if ($('aside').classList.contains('open')) closeDrawer(false);
+  $('#title').textContent = (NAV_LABELS[role] || {})[view] || titles[view]; if ($('aside').classList.contains('open')) closeDrawer(false);
   if (!opts.fromHistory) { const url = new URL(location.href); if (view === 'dashboard') url.searchParams.delete('view'); else url.searchParams.set('view', view); history.pushState(null, '', url); }
   $('#content').innerHTML = skeleton();
   try {
@@ -536,7 +545,7 @@ async function dashboard() {
   if (role === 'intern') {
     const req = d.requirements;
     const pilot = await api(`pilot-context?intern_id=${activeId()}`);
-    $('#content').innerHTML = `<div class="hero"><small>${esc(req.profile.requirement_profile_name || req.profile.institution || 'Placement')}</small><h2>Welcome, ${esc(S.session.profile.display_name || '')}.</h2><p>Your handbook, weekly plan, live requirements, supervision preparation and help when you are stuck — in one place.</p><div class="actions"><button class="btn" data-go="handbook">Open handbook</button><button class="btn" data-go="assistant">I’m stuck / ask for help</button><button class="btn" data-go="progress">Check my targets</button><button class="btn" data-go="feedback">Give pilot feedback</button></div></div>
+    $('#content').innerHTML = `<div class="hero"><small>${esc(req.profile.requirement_profile_name || req.profile.institution || 'Placement')}</small><h2>Welcome, ${esc(S.session.profile.display_name || '')}.</h2><p>Record today’s sessions and activities, keep your referrals moving, and see how your hours are tracking.</p><div class="actions"><button class="btn primary" data-go="daily">Record today’s work</button><button class="btn" data-go="referrals">My referrals</button><button class="btn" data-go="assistant">I’m stuck / ask for help</button><button class="btn" data-go="feedback">Give pilot feedback</button></div></div>
       ${requirementSummaryCard(req)}
       <div class="grid two" style="margin-top:14px">${weeklyScheduleCard(pilot.schedule)}${plannedActivitiesCard(pilot.planned)}</div><div class="grid two" style="margin-top:14px">${clinicalPaceCard(req)}<div class="card"><h3>Current workload</h3><div class="mini-grid"><div><small>Active cases</small><b>${d.metrics.active_cases}</b></div><div><small>Open supervision items</small><b>${d.metrics.open_supervision}</b></div><div><small>Outstanding deliverables</small><b>${req.summary.outstanding_deliverables}</b></div><div><small>Expected attended sessions</small><b>${fmt(req.summary.expected_attended_sessions)}/wk</b></div></div><div class="actions dark"><button class="btn" data-go="supervision">Prepare supervision</button><button class="btn" data-go="handbook">Open handbook</button></div></div></div>`;
     bindGo(); return;

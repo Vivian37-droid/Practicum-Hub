@@ -139,3 +139,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 @media(max-width:900px){.institution-strip{height:72px}.institution-group{gap:24px;padding:8px 24px}.institution-strip .institution-logo.wcg-logo img{height:44px;max-height:none;max-width:210px}.institution-strip .institution-logo.sacap-logo img{height:32px;max-height:none;max-width:100px}.institution-strip .institution-logo.cornerstone-logo img{height:38px;max-height:none;max-width:180px}.institution-quote{font-size:14px}}
 @media(max-width:600px){.institution-strip{height:64px}.institution-group{gap:20px;padding:7px 20px}.institution-logo.cornerstone-logo{padding:5px 9px}.institution-strip .institution-logo.wcg-logo img{height:38px;max-height:none;max-width:185px}.institution-strip .institution-logo.sacap-logo img{height:28px;max-height:none;max-width:88px}.institution-strip .institution-logo.cornerstone-logo img{height:32px;max-height:none;max-width:155px}.institution-quote{font-size:13px;padding-left:18px}}
 @media print{.institution-strip{display:none!important}}
+.navgroup{margin:4px 0 10px}
+.navhead{margin:10px 12px 2px;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#ffffff80}
+.navgroup:first-child .navhead{margin-top:2px}
+.hero .actions .btn.primary{background:#fff;color:var(--navy);border-color:#fff;box-shadow:0 4px 14px #0002}
