@@ -17,10 +17,11 @@ export async function onRequest({ request, env }) {
     if (!['GET', 'HEAD'].includes(request.method)) { try { body = await request.json(); } catch {} }
     const method = request.method;
 
+    // The dashboard is loaded separately by the first view, so bootstrap no
+    // longer computes it too (it is the heaviest query and doubled sign-in time).
     if (path === 'bootstrap') return json({
       profile: ctx.profile,
       role: ctx.role,
-      dashboard: await h.dashboard(ctx, env),
       system_health: ctx.role === 'programme_lead' ? await h.systemHealth(ctx, env) : null
     });
     if (path === 'system-health') return json(await h.systemHealth(ctx, env));

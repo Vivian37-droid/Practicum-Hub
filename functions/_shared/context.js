@@ -99,7 +99,15 @@ export async function audit(ctx, env, action, entityType, entityId, detail, prof
     detail: detail ? JSON.stringify(detail) : null,
     reason: reason || null
   }).select('id').single();
-  if (error) throw new HttpError(500, error.message);
+  if (error) {
+    // A delete must not proceed without its snapshot (that is what Undo
+    // restores from). Every other entry is written after the change has
+    // already been saved, so failing the request would tell the user their
+    // save failed when it did not — and a retry would create a duplicate.
+    if (action === 'delete') throw new HttpError(500, error.message);
+    console.error(`audit_log insert failed for ${action} ${entityType} ${entityId}:`, error.message);
+    return null;
+  }
   return data.id;
 }
 

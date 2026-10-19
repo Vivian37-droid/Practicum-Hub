@@ -66,11 +66,46 @@ let idleLogoutTimer=null,idleWarningTimer=null,idleListenersBound=false;
 function resetIdleTimers(){
   if(!S.session||S.preview)return;
   clearTimeout(idleLogoutTimer);clearTimeout(idleWarningTimer);
-  idleWarningTimer=setTimeout(()=>toast('For your security, you will be signed out in 2 minutes unless you continue working.'),IDLE_WARNING_MS);
-  idleLogoutTimer=setTimeout(async()=>{try{await S.supabase?.auth.signOut()}finally{location.reload()}},IDLE_LIMIT_MS);
+  $('#idleWarn')?.remove();
+  idleWarningTimer=setTimeout(showIdleWarning,IDLE_WARNING_MS);
+  idleLogoutTimer=setTimeout(async()=>{saveFormDraft();try{await S.supabase?.auth.signOut()}finally{location.reload()}},IDLE_LIMIT_MS);
+}
+// A visible, persistent warning instead of a 2-second toast that was easy to
+// miss. Any tap (including the button) counts as activity and dismisses it.
+function showIdleWarning(){
+  if($('#idleWarn'))return;
+  const el=document.createElement('div');
+  el.id='idleWarn';el.className='notice amber';el.setAttribute('role','alert');
+  el.style.cssText='position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:1000;max-width:min(92vw,520px);display:flex;gap:12px;align-items:center;box-shadow:0 8px 24px #0003';
+  el.innerHTML='<span><b>Still there?</b> For your security you will be signed out in 2 minutes. Anything you have not saved will be kept to restore after you sign in again.</span><button type="button" class="btn primary">Stay signed in</button>';
+  document.body.appendChild(el);
+}
+// If the idle sign-out happens with a half-filled form open, keep it (this
+// tab only, for 2 hours) and offer to restore it after the next sign-in.
+// Every form is submitted through FORM_HANDLERS by its id, so re-rendering
+// the same form HTML and refilling its fields makes it fully saveable again.
+const DRAFT_KEY='hub_unsaved_form',DRAFT_MAX_AGE_MS=2*60*60*1000;
+function saveFormDraft(){
+  try{
+    const form=$('#modal.open #modalBody form');
+    if(!form||!modalDirty)return;
+    const values=[...form.elements].filter(x=>x.name&&x.type!=='hidden').map(x=>[x.name,x.type==='checkbox'?x.checked:x.value]);
+    sessionStorage.setItem(DRAFT_KEY,JSON.stringify({title:$('#modalTitle').textContent,html:$('#modalBody').innerHTML,values,at:Date.now(),user:S.session?.profile?.id}));
+  }catch{}
+}
+function offerFormDraft(){
+  let draft=null;
+  try{draft=JSON.parse(sessionStorage.getItem(DRAFT_KEY)||'null');sessionStorage.removeItem(DRAFT_KEY);}catch{}
+  if(!draft||draft.user!==S.session?.profile?.id||Date.now()-draft.at>DRAFT_MAX_AGE_MS)return;
+  toast('You were signed out with an unsaved form.',{label:'Restore it',onClick:()=>{
+    modal(draft.title,draft.html);
+    const form=$('#modalBody form');
+    for(const [name,value] of draft.values){const el=form?.elements[name];if(!el)continue;if(el.type==='checkbox')el.checked=value;else el.value=value;}
+    modalDirty=true;
+  }},20000);
 }
 function startIdleProtection(){
-  if(!idleListenersBound){['pointerdown','keydown','touchstart','scroll'].forEach(name=>window.addEventListener(name,resetIdleTimers,{passive:true}));idleListenersBound=true;}
+  if(!idleListenersBound){['pointerdown','keydown','touchstart','scroll','input','change'].forEach(name=>window.addEventListener(name,resetIdleTimers,{passive:true}));idleListenersBound=true;}
   resetIdleTimers();
 }
 
@@ -103,13 +138,18 @@ let toastTimer = null;
 // referral/supervision/pilot_feedback deletes (the entities restoreAudit()
 // can actually re-insert verbatim), the success toast carries an Undo
 // button that calls it, instead of the delete being the final word.
-function toast(text, action = null) {
+// Messages stay up long enough to read — about 70 ms per character, 2.6–9 s
+// (error messages used to vanish after 2.2 s, so a failed save could look
+// like a successful one). Tapping a message dismisses it.
+function toast(text, action = null, ms = null) {
   clearTimeout(toastTimer);
   const el = $('#toast');
   el.innerHTML = action ? `<span>${esc(text)}</span> <button type="button" class="toast-undo">${esc(action.label)}</button>` : esc(text);
-  if (action) $('.toast-undo', el).onclick = () => { clearTimeout(toastTimer); el.classList.remove('show'); action.onClick(); };
+  if (action) $('.toast-undo', el).onclick = e => { e.stopPropagation(); clearTimeout(toastTimer); el.classList.remove('show'); action.onClick(); };
+  el.onclick = () => { clearTimeout(toastTimer); el.classList.remove('show'); };
   el.classList.add('show');
-  toastTimer = setTimeout(() => el.classList.remove('show'), action ? 8000 : 2200);
+  const duration = ms || (action ? 8000 : Math.min(9000, Math.max(2600, String(text).length * 70)));
+  toastTimer = setTimeout(() => el.classList.remove('show'), duration);
 }
 // Prompt 2: accessible dialog behaviour shared by #modal and the #em
 // (emergency) dialog — both already have role="dialog"/aria-modal="true"/
@@ -127,7 +167,7 @@ function openDialog(el) {
   dialogReturnFocus = document.activeElement;
   el.classList.add('open');
   const onKey = e => {
-    if (e.key === 'Escape') { e.preventDefault(); closeDialog(el); return; }
+    if (e.key === 'Escape') { e.preventDefault(); el.id === 'modal' ? requestCloseModal() : closeDialog(el); return; }
     if (e.key !== 'Tab') return;
     const items = focusableIn(el.querySelector('.modal-card'));
     if (!items.length) return;
@@ -153,9 +193,21 @@ function modal(title, html, closeLabel) {
   $('#modalTitle').textContent = title;
   $('#modalBody').innerHTML = html;
   $('#modalClose').setAttribute('aria-label', 'Close ' + (closeLabel || title));
+  modalDirty = false;
   openDialog($('#modal'));
 }
-function closeModal() { closeDialog($('#modal')); }
+// closeModal() is the programmatic close (after a successful save).
+// requestCloseModal() is what the ×, Escape and a tap outside the form use:
+// if anything has been typed, it asks before throwing the entry away —
+// previously one stray tap on the dimmed background discarded the form.
+let modalDirty = false;
+function closeModal() { modalDirty = false; closeDialog($('#modal')); }
+function requestCloseModal() {
+  if (modalDirty && $('#modalBody form') && !confirm('Discard what you have entered? It has not been saved.')) return;
+  closeModal();
+}
+$('#modalBody').addEventListener('input', () => { modalDirty = true; });
+$('#modalBody').addEventListener('change', () => { modalDirty = true; });
 function openEmergency() { openDialog($('#em')); }
 function closeEmergency() { closeDialog($('#em')); }
 
@@ -277,17 +329,28 @@ async function api(path, options = {}) {
   if (S.preview) return demoApi(path, options);
   let session = await accessSession();
   if (!session) throw Error('Your session has expired. Please sign in again.');
+  const writing = options.method && options.method !== 'GET';
   const request = currentSession => fetch('/api/' + path, {
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${currentSession.access_token}` },
-    ...options
+    ...options,
+    headers: { 'content-type': 'application/json', ...(options.headers || {}), authorization: `Bearer ${currentSession.access_token}` }
+  }).catch(() => {
+    throw Error(writing
+      ? 'No connection — this did not go through. Check your internet and try again.'
+      : 'No connection. Check your internet and try again.');
   });
   let response = await request(session);
   if (response.status === 401) {
     session = await accessSession(true);
-    if (session) response = await request(session);
+    if (!session) throw Error('Your session has expired. Please sign in again.');
+    response = await request(session);
   }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw Error(body.error || 'Request failed');
+  if (!response.ok) {
+    if (body.error) throw Error(body.error);
+    throw Error(writing
+      ? `The Hub could not complete this (error ${response.status}). Please try again in a moment.`
+      : `The Hub could not load this (error ${response.status}). Please try again in a moment.`);
+  }
   return body;
 }
 
@@ -1421,6 +1484,7 @@ async function finishLogin(){
     const missing=S.systemHealth.missing?.length?` Missing: ${S.systemHealth.missing.join(', ')}.`:'';
     toast(`Database update required (expected schema ${S.systemHealth.required_version}).${missing}`);
   }
+  offerFormDraft();
 }
 
 // Auth: Supabase Auth (supabase-js) replaces @netlify/identity. Invite and
@@ -1450,11 +1514,35 @@ async function init(){
       if(event==='SIGNED_IN' && hashType==='invite') return showPasswordSetup('invite');
     });
     const { data: { session } } = await S.supabase.auth.getSession();
-    if(session && !hashType) return finishLogin();
-  }catch(e){ if(!allowed) authError(e.message||'Sign-in could not be completed.'); }
+    // Awaited inside the try so a failed restore shows a message instead of
+    // silently leaving the sign-in screen up.
+    if(session && !hashType) return await finishLogin();
+  }catch(e){ if(!allowed) authError(friendlyAuthError(e)); }
 }
 
-$('#login').onsubmit=async e=>{e.preventDefault();try{const {error}=await S.supabase.auth.signInWithPassword({email:$('#email').value,password:$('#password').value});if(error)throw error;await finishLogin();}catch(x){authError(x.message);}};
+// Plain-language sign-in errors. The commonest real causes are a mistyped
+// password, a used/expired email link, or clinic Wi-Fi blocking the sign-in
+// service (cdn.jsdelivr.net / supabase.co).
+function friendlyAuthError(x){
+  const m=String(x?.message||x||'');
+  if(/invalid login credentials/i.test(m)) return 'The email or password is not right. Check for typing mistakes, or use “Forgot password?” to set a new one.';
+  if(/email not confirmed/i.test(m)) return 'This account has not been activated yet. Open the invitation email and follow its link, or ask your programme lead to resend it.';
+  if(/failed to fetch|networkerror|load failed|importing a module|dynamically imported/i.test(m)||!S.supabase) return 'The sign-in service could not be reached. Check your internet connection and reload the page. If you are on clinic or hospital Wi-Fi, try mobile data — some networks block it.';
+  if(/rate limit|too many/i.test(m)) return 'Too many attempts. Wait a few minutes, then try again.';
+  return m||'Sign-in could not be completed. Please try again.';
+}
+$('#login').onsubmit=async e=>{
+  e.preventDefault();
+  const btn=$('#loginBtn');
+  btn.disabled=true;btn.textContent='Signing in…';
+  try{
+    if(!S.supabase) throw Error('Failed to fetch');
+    const {error}=await S.supabase.auth.signInWithPassword({email:$('#email').value.trim(),password:$('#password').value});
+    if(error)throw error;
+    await finishLogin();
+  }catch(x){authError(friendlyAuthError(x));}
+  finally{btn.disabled=false;btn.textContent='Sign in';}
+};
 $('#forgotPassword').onclick=async()=>{
   const email=$('#email').value.trim();
   if(!email){authError('Enter your email address first, then select “Forgot password?”.');$('#email').focus();return;}
@@ -1471,7 +1559,7 @@ $('#logout').onclick=()=>S.preview?location.reload():(S.supabase.auth.signOut().
 $('#menu').onclick=()=>{$('aside').classList.contains('open')?closeDrawer():openDrawer();};
 $('#navClose').onclick=()=>closeDrawer();
 $('#navBackdrop').onclick=()=>closeDrawer();
-$('#modalClose').onclick=closeModal; $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal();};
+$('#modalClose').onclick=requestCloseModal; $('#modal').onclick=e=>{if(e.target.id==='modal')requestCloseModal();};
 $('#emergency').onclick=openEmergency; $('#emClose').onclick=closeEmergency; $('#em').onclick=e=>{if(e.target.id==='em')closeEmergency();};
 $('#quickHelp').onclick=()=>{S.assistantSeed='';go('assistant');};
 init();
